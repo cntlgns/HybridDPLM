@@ -161,8 +161,19 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
         else:
             # Load DPLM-2 model checkpoint from huggingface
             dplm_type = AutoConfig.from_pretrained(net_name).dplm_type
-            net_class = get_net_class(dplm_type)
-            net = net_class.from_pretrained(net_name, **net_override)
+            # dplm2_3B is uploaded with dplm_type="dplm_esm" (sequence-only class) by mistake.
+            # Any model with the multimodal vocab (size > 33) must use EsmForDPLM2 so that
+            # type_ids and the custom attention_bias are properly handled.
+            if dplm_type == "dplm_esm":
+                from byprot.models.dplm2.modules.dplm2_modeling_esm import EsmForDPLM2
+                print(
+                    f"[DPLM2] Warning: '{net_name}' has dplm_type='dplm_esm' but is being "
+                    f"loaded as EsmForDPLM2 (dplm2_esm) to enable multimodal type_ids support."
+                )
+                net = EsmForDPLM2.from_pretrained(net_name, **net_override)
+            else:
+                net_class = get_net_class(dplm_type)
+                net = net_class.from_pretrained(net_name, **net_override)
             return cls(cfg=cfg_override, net=net)
 
     def _prepare_special_token(self):
