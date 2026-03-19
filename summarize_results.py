@@ -5,7 +5,8 @@ Usage:
         --exp_name reproduction \
         --dataset cameo2022 \
         --model_name dplm2_650m \
-        --sampling_strategy argmax
+        --sampling_strategy argmax \
+        --remasking_strategy uncond
 """
 
 import argparse
@@ -39,10 +40,10 @@ STAT_FUNCS = {
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-def summarize(exp_name, dataset, model_name, sampling_strategy):
+def summarize(exp_name, dataset, model_name, sampling_strategy, remasking_strategy="uncond"):
     base_dir = os.path.join(PROJECT_DIR, "generation-results", exp_name)
     input_csv = os.path.join(
-        base_dir, dataset, model_name, sampling_strategy,
+        base_dir, dataset, model_name, sampling_strategy, remasking_strategy,
         "inverse_folding", "aatype", "eval", "all_top_samples.csv",
     )
     output_csv = os.path.join(base_dir, "summary.csv")
@@ -54,6 +55,7 @@ def summarize(exp_name, dataset, model_name, sampling_strategy):
         "dataset": dataset,
         "model_name": model_name,
         "sampling_strategy": sampling_strategy,
+        "remasking_strategy": remasking_strategy,
         "num_samples": len(df),
     }
 
@@ -83,6 +85,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--model_name", required=True)
     parser.add_argument("--sampling_strategy", required=True)
+    parser.add_argument("--remasking_strategy", default="uncond")
     args = parser.parse_args()
 
     summarize(
@@ -90,4 +93,5 @@ if __name__ == "__main__":
         args.dataset,
         args.model_name,
         args.sampling_strategy,
+        args.remasking_strategy,
     )

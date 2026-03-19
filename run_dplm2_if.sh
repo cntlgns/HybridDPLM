@@ -46,4 +46,5 @@ ${PYTHON_BIN} ${PROJECT_DIR}/summarize_results.py \
     --exp_name ${EXP_NAME} \
     --dataset ${DATASET} \
     --model_name ${MODEL_NAME} \
-    --sampling_strategy ${SAMPLING_STRATEGY}
+    --sampling_strategy ${SAMPLING_STRATEGY} \
+    --remasking_strategy ${REMASKING_STRATEGY}
