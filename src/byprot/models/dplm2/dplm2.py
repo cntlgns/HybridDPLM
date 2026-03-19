@@ -161,8 +161,19 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
         else:
             # Load DPLM-2 model checkpoint from huggingface
             dplm_type = AutoConfig.from_pretrained(net_name).dplm_type
-            net_class = get_net_class(dplm_type)
-            net = net_class.from_pretrained(net_name, **net_override)
+            # dplm2_3B is uploaded with dplm_type="dplm_esm" (sequence-only class) by mistake.
+            # Any model with the multimodal vocab (size > 33) must use EsmForDPLM2 so that
+            # type_ids and the custom attention_bias are properly handled.
+            if dplm_type == "dplm_esm":
+                from byprot.models.dplm2.modules.dplm2_modeling_esm import EsmForDPLM2
+                print(
+                    f"[DPLM2] Warning: '{net_name}' has dplm_type='dplm_esm' but is being "
+                    f"loaded as EsmForDPLM2 (dplm2_esm) to enable multimodal type_ids support."
+                )
+                net = EsmForDPLM2.from_pretrained(net_name, **net_override)
+            else:
+                net_class = get_net_class(dplm_type)
+                net = net_class.from_pretrained(net_name, **net_override)
             return cls(cfg=cfg_override, net=net)
 
     def _prepare_special_token(self):
@@ -677,6 +688,14 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
                 ~non_special_sym_mask, 1000.0
             )
 
+            if condition == "no_remask":
+                # Exclude already-unmasked positions from the lowest-k ranking.
+                # Without this, cutoff_len is computed over ALL valid positions,
+                # so unmasked tokens could "take up slots" and cause masked tokens
+                # to skip the lowest_k_mask, leading to over-unmasking per step.
+                already_unmasked = non_special_sym_mask & ~xt_neq_x0
+                _scores_for_topk = _scores_for_topk.masked_fill(already_unmasked, 1000.0)
+
             # the top-k selection can be done in two ways: stochastic by injecting Gumbel noise or deterministic
             if topk_mode.startswith("stochastic"):
                 noise_scale = float(topk_mode.replace("stochastic", ""))
@@ -728,6 +747,9 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
                 )
             elif condition == "uncond":
                 not_v1_t = lowest_k_mask
+            elif condition == "no_remask":
+                # Never re-mask a previously unmasked token.
+                not_v1_t = torch.zeros_like(lowest_k_mask)
             else:
                 raise NotImplementedError
 
@@ -768,9 +790,13 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
             # For convenience, save the NOT of b_t for the next iteration
             # NOT_b_{t} = (NOT_b_{t+1} | not_v1_t) & not_v2_t
             #
-            # # When condition is 'uncond', the not_v1_t is equal to not_v2_t, the new_xt_neq_x0 is always equal to not_v1/v2_t (?)
+            # When condition is 'uncond', not_v1_t == not_v2_t, so new_xt_neq_x0 == not_v2_t.
+            # When condition is 'no_remask', not_v1_t == 0, so new_xt_neq_x0 == xt_neq_x0 & not_v2_t,
+            # which can differ from not_v2_t when an already-unmasked position falls into lowest_k_mask
+            # (edge case: cutoff_len > masked_count at late steps).
             new_xt_neq_x0 = (xt_neq_x0 | not_v1_t) & not_v2_t
-            assert (new_xt_neq_x0 == not_v2_t).all()
+            if condition == "uncond":
+                assert (new_xt_neq_x0 == not_v2_t).all()
             # import ipdb; ipdb.set_trace()
             return new_xt_neq_x0, output_tokens, output_scores
 
@@ -816,6 +842,7 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
         partial_masks=None,
         unmasking_strategy="stochastic1.0",  # [stochastic{temperature}, deterministic]
         sampling_strategy="annealing@2.0:0.1",
+        remasking_strategy="uncond",  # [uncond, cond, no_remask]
     ):
         self.eval()
         max_iter = max_iter
@@ -918,7 +945,7 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
                 output_scores=prev_decoder_out["output_scores"].clone(),
                 cur_tokens=output_tokens.clone(),
                 cur_scores=output_scores.clone(),
-                decoding_strategy=f"reparam-uncond-{unmasking_strategy}-linear",
+                decoding_strategy=f"reparam-{remasking_strategy}-{unmasking_strategy}-linear",
                 xt_neq_x0=prev_decoder_out["output_masks"],
                 type_ids=prev_decoder_out["type_ids"].clone(),
                 non_special_sym_mask=non_special_sym_mask,
@@ -939,6 +966,7 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
                 step=step + 1,
                 history=decoder_out["history"],
             )
+            # print(result_tokens[1][130:163]) # for cameo2022, we can check how it gets generated step by step
 
         decoder_out = prev_decoder_out
         return {

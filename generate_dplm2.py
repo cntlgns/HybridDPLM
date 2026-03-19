@@ -252,6 +252,7 @@ def unconditional_generate(args):
                     temperature=args.temperature,
                     unmasking_strategy=args.unmasking_strategy,
                     sampling_strategy=args.sampling_strategy,
+                    remasking_strategy=args.remasking_strategy,
                 )
                 if args.task == "backbone_generation":
                     outputs["output_tokens"] = torch.cat(
@@ -357,6 +358,7 @@ def conditional_generate_from_fasta(args):
                 unmasking_strategy=args.unmasking_strategy,
                 sampling_strategy=args.sampling_strategy,
                 partial_masks=batch["partial_mask"],
+                remasking_strategy=args.remasking_strategy,
             )
 
         save_results(
@@ -518,6 +520,18 @@ def main():
     )
     parser.add_argument(
         "--unmasking_strategy", type=str, default="stochastic1.0"
+    )
+    parser.add_argument(
+        "--remasking_strategy",
+        type=str,
+        default="uncond",
+        choices=["uncond", "cond", "no_remask"],
+        help=(
+            "Conditioning mode for reparameterized decoding. "
+            "'uncond': standard; any token can be re-masked. "
+            "'cond': conservative re-masking (only when score drops and token unchanged). "
+            "'no_remask': once a token is unmasked it is never re-masked."
+        ),
     )
     parser.add_argument("--max_iter", type=int, default=500)
     parser.add_argument("--batch_size", type=int, default=50)
