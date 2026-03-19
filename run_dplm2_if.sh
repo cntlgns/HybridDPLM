@@ -1,14 +1,16 @@
 #!/bin/bash
-# Usage: bash run_dplm2_if.sh <exp_name> <dataset> <model_name> <sampling_strategy>
-# Example: bash run_dplm2_if.sh reproduction cameo2022 dplm2_650m argmax
+# Usage: bash run_dplm2_if.sh <exp_name> <dataset> <model_name> <sampling_strategy> [remasking_strategy]
+# Example: bash run_dplm2_if.sh reproduction cameo2022 dplm2_650m argmax uncond
+# remasking_strategy options: uncond (default), cond, no_remask
 
 EXP_NAME=$1
 DATASET=$2
 MODEL_NAME=$3
 SAMPLING_STRATEGY=$4
+REMASKING_STRATEGY=${5:-uncond}
 
 PROJECT_DIR=/data_fast/home/sihun/diffprotein/dplm
-OUTPUT_DIR=${PROJECT_DIR}/generation-results/${EXP_NAME}/${DATASET}/${MODEL_NAME}/${SAMPLING_STRATEGY}
+OUTPUT_DIR=${PROJECT_DIR}/generation-results/${EXP_NAME}/${DATASET}/${MODEL_NAME}/${SAMPLING_STRATEGY}/${REMASKING_STRATEGY}
 INPUT_FASTA=${PROJECT_DIR}/data-bin/${DATASET}/struct.fasta
 EVAL_DIR=${OUTPUT_DIR}/inverse_folding
 
@@ -33,6 +35,7 @@ ${PYTHON_BIN} generate_dplm2.py \
     --max_iter 100 \
     --unmasking_strategy deterministic \
     --sampling_strategy ${SAMPLING_STRATEGY} \
+    --remasking_strategy ${REMASKING_STRATEGY} \
     --saveto ${OUTPUT_DIR} && \
 ${PYTHON_BIN} src/byprot/utils/protein/evaluator_dplm2.py \
     -cn inverse_folding \
