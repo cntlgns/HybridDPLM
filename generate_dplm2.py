@@ -474,18 +474,36 @@ def save_results(
             for idx, (header, aatype_str, struct_tokens_str) in enumerate(
                 zip(headers, aatype_strings, struct_tokens_strings)
             ):
+                # import ipdb; ipdb.set_trace()
+                # bit_model
+                # ipdb> outputs['output_tokens'].shape
+                # torch.Size([50, 260])
+                # ipdb> outputs['res_mask'].shape
+                # torch.Size([50, 128])
+                # ipdb> outputs['res_mask'].sum(dim=1)
+                # tensor([ 15,  31,  31,  35,  38,  38,  41,  41,  44,  44,  46,  49,  50,  54,
+                #         55,  56,  60,  60,  61,  62,  63,  63,  63,  64,  65,  67,  69,  70,
+                #         72,  77,  79,  87,  89,  96,  96,  98, 102, 103, 108, 116, 117, 118,
+                #         118, 119, 119, 120, 121, 123, 123, 128], device='cuda:0')
+                # outputs['res_mask'] is a binary mask indicating the valid length of the generated structure tokens for each sequence in the batch.
+                # ipdb> outputs['final_struct_feature'].shape
+                # torch.Size([50, 128, 13])
+                # ipdb> outputs['final_struct_feature'][0][0]
+                # tensor([ 1.,  1.,  1.,  1.,  1., -1., -1.,  1.,  1., -1.,  1., -1., -1.], device='cuda:0')
+                # outputs['final_struct_feature'] contains the final generated structural features for each sequence in the batch, 
+                # where the valid features are indicated by the corresponding positions in outputs['res_mask'].
+                # valid structural features are represented by 13-dimensional vectors in outputs['final_struct_feature'].
                 (
                     aatype_tensor,
                     struct_tokens_tensor,
                 ) = struct_tokenizer.string_to_tensor(
                     aatype_str, struct_tokens_str
                 )
-                if "final_struct_feature" in outputs:
+                if "final_struct_feature" in outputs: # bit_model has "final_struct_feature" in outputs
+                    actual_len = int(outputs["res_mask"][idx].sum().item())
                     decoder_out = struct_tokenizer.detokenize(
-                        struct_tokens=outputs["final_struct_feature"][idx][
-                            None
-                        ],
-                        res_mask=outputs["res_mask"][idx][None],
+                        struct_tokens=outputs["final_struct_feature"][idx][:actual_len].unsqueeze(0),
+                        res_mask=outputs["res_mask"][idx][:actual_len].unsqueeze(0),
                     )
                 else:
                     decoder_out = struct_tokenizer.detokenize(

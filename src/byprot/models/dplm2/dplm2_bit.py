@@ -348,6 +348,7 @@ class DPLM2Bit(DPLM2):
         partial_masks=None,
         unmasking_strategy="stochastic1.0",  # [stochastic{temperature}, deterministic]
         sampling_strategy="annealing@1.1:0.1",
+        remasking_strategy="uncond",  # [uncond, cond, no_remask]
     ):
         self.eval()
         max_iter = max_iter
@@ -404,7 +405,7 @@ class DPLM2Bit(DPLM2):
                 output_scores=prev_decoder_out["output_scores"].clone(),
                 cur_tokens=output_tokens.clone(),
                 cur_scores=output_scores.clone(),
-                decoding_strategy=f"reparam-uncond-{unmasking_strategy}-linear",
+                decoding_strategy=f"reparam-{remasking_strategy}-{unmasking_strategy}-linear",
                 xt_neq_x0=prev_decoder_out["output_masks"],
                 type_ids=prev_decoder_out["type_ids"].clone(),
                 non_special_sym_mask=non_special_sym_mask,
@@ -445,8 +446,9 @@ class DPLM2Bit(DPLM2):
         bsz, max_len = non_bos_eos_mask.shape
 
         res_mask = (
-            non_special_sym_mask.chunk(2, dim=1)[0][non_bos_eos_mask]
+            lm_output_struct_tokens[non_bos_eos_mask]
             .view(bsz, max_len - 2)
+            .ne(self.pad_id)
             .int()
         )
         struct_tokens = (

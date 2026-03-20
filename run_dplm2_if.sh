@@ -28,9 +28,15 @@ PYTHON_BIN=${PROJECT_DIR}/.venv/bin/python
 cd ${PROJECT_DIR}
 mkdir -p ${OUTPUT_DIR}
 
+BIT_MODEL_FLAG=""
+if [[ "${MODEL_NAME}" == "dplm2_bit_650m" ]]; then
+    BIT_MODEL_FLAG="--bit_model"
+fi
+
 ${PYTHON_BIN} generate_dplm2.py \
     --model_name airkingbd/${MODEL_NAME} \
     --task inverse_folding \
+    ${BIT_MODEL_FLAG} \
     --input_fasta_path ${INPUT_FASTA} \
     --max_iter 100 \
     --unmasking_strategy deterministic \
