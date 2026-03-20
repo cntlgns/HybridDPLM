@@ -324,6 +324,7 @@ def conditional_generate_from_fasta(args):
     batches, name_lists = initialize_conditional_generation(
         args.input_fasta_path, tokenizer, device, args=args, model=model
     )
+    import ipdb; ipdb.set_trace()
 
 # ipdb> batches[0]['input_tokens'][0]
 # tensor([  33, 8024, 3768, 7068, 2972, 5722, 7197, 7861, 4444, 4925,  279,  534,

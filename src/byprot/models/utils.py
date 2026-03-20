@@ -254,6 +254,50 @@ def get_net_dplm2_bit(cfg):
     return net
 
 
+def get_net_dplm2_lm_heads(cfg):
+    """Factory for EsmForDPLM2LMHeads: separate struct/AA heads, integer struct tokens."""
+    if cfg.net.arch_type == "esm":
+        from byprot.models.dplm2.modules.dplm2_lm_heads_modeling_esm import (
+            EsmForDPLM2LMHeads,
+        )
+
+        config = AutoConfig.from_pretrained(f"{cfg.net.name}")
+        net = EsmForDPLM2LMHeads(
+            config,
+            dropout=cfg.net.dropout,
+            struct_vocab_size=getattr(cfg, "struct_vocab_size", 8192),
+        )
+    else:
+        raise NotImplementedError
+
+    if cfg.net.pretrain:
+        pretrained_model_name_or_path = cfg.net.pretrained_model_name_or_path
+        from byprot.models.dplm import DiffusionProteinLanguageModel
+
+        # Load sequence-only DPLM weights (strict=False: lm_head_struct is new)
+        pretrained_state_dict = DiffusionProteinLanguageModel.from_pretrained(
+            pretrained_model_name_or_path
+        ).net.state_dict()
+        net.load_state_dict(pretrained_state_dict, strict=False)
+        del pretrained_state_dict
+
+    if cfg.lora.enable:
+        lora_target_module = cfg.lora.lora_target_module.split(",")
+        modules_to_save = cfg.lora.modules_to_save.split(",")
+        peft_config = LoraConfig(
+            task_type=TaskType.SEQ_2_SEQ_LM,
+            target_modules=lora_target_module,
+            modules_to_save=modules_to_save,
+            inference_mode=False,
+            r=cfg.lora.lora_rank,
+            lora_alpha=32,
+            lora_dropout=cfg.lora.lora_dropout,
+        )
+        net = get_peft_model(net, peft_config)
+
+    return net
+
+
 def topk_masking(scores, cutoff_len, stochastic=False, temp=1.0):
     """
     scores: [b, n]
