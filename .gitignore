@@ -164,3 +164,4 @@ outputs/
 data-bin/scaffolding-pdbs/*.pdb
 temp.ipynb
 # run/
+length_analyze/
