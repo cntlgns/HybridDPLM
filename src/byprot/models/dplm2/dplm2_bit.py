@@ -18,6 +18,13 @@ from byprot.models.dplm2.dplm2 import (
 )
 from byprot.models.dplm2.modules.dplm2_modeling_esm import *
 from byprot.models.utils import *
+from byprot.models.dplm2.decoding_strategies import (
+    parse_strategy_name,
+    parse_strategy_kwargs,
+    KLASSState,
+    CreditState,
+    LRDState,
+)
 
 
 @dataclass
@@ -308,6 +315,13 @@ class DPLM2Bit(DPLM2):
 
         history.append(output_tokens.clone())
 
+        # Build combined log-probs for new decoding strategies
+        # aatype_logits: [B, L, V_aa], struct_logits: [B, L, C, 2] -> concat log-softmax
+        combined_logits = torch.cat([
+            struct_logits.reshape(bsz, seq_len, -1),  # [B, L, C*2]
+            aatype_logits,  # [B, L, V_aa]
+        ], dim=-1).log_softmax(dim=-1)
+
         return dict(
             output_tokens=output_tokens,
             output_scores=output_scores,
@@ -316,6 +330,7 @@ class DPLM2Bit(DPLM2):
             max_step=max_step,
             history=history,
             all_hidden_states=net_out["all_hidden_states"],
+            logits=combined_logits,
         )
 
     def sample_from_logits(
@@ -349,10 +364,17 @@ class DPLM2Bit(DPLM2):
         unmasking_strategy="stochastic1.0",  # [stochastic{temperature}, deterministic]
         sampling_strategy="annealing@1.1:0.1",
         remasking_strategy="uncond",  # [uncond, cond, no_remask]
+        decoding_strategy=None,  # e.g. "dinfer_threshold@0.8", "klass@0.01:0.9:2:1", etc.
     ):
         self.eval()
         max_iter = max_iter
         temperature = temperature
+
+        # Determine which decoding path to use
+        if decoding_strategy is None:
+            strategy_name = "reparam"
+        else:
+            strategy_name = parse_strategy_name(decoding_strategy)
 
         # 0) encoding
         encoder_out = self.forward_encoder(input_tokens)
@@ -379,7 +401,38 @@ class DPLM2Bit(DPLM2):
             prev_decoder_out["output_tokens"], partial_masks=partial_masks
         )
 
+        # --- Initialize strategy-specific state ---
+        strategy_kwargs = parse_strategy_kwargs(decoding_strategy) if decoding_strategy else {}
+        strategy_state = {}
+        B, L = initial_output_tokens.shape
+
+        if strategy_name == "klass":
+            n = strategy_kwargs.get("n", 2)
+            strategy_state["klass_aa"] = KLASSState(n=n)
+            strategy_state["klass_struct"] = KLASSState(n=n)
+            strategy_state["prev_log_probs"] = None
+        elif strategy_name == "dinfer_credit":
+            V = getattr(self.cfg, "vocab_size", None) or getattr(self.cfg.tokenizer, "vocab_size", 8229)
+            strategy_state["credit_aa"] = CreditState(
+                B, L, V, initial_output_tokens.device,
+                beta=strategy_kwargs.get("beta", 0.8),
+                gamma=strategy_kwargs.get("gamma", 0.2),
+            )
+            strategy_state["credit_struct"] = CreditState(
+                B, L, V, initial_output_tokens.device,
+                beta=strategy_kwargs.get("beta", 0.8),
+                gamma=strategy_kwargs.get("gamma", 0.2),
+            )
+        elif strategy_name == "lrd":
+            strategy_state["lrd_aa"] = LRDState()
+            strategy_state["lrd_struct"] = LRDState()
+
         for step in tqdm(range(max_iter), desc="Decoding"):
+            # Early stopping: if nothing is masked, stop
+            if strategy_name != "reparam":
+                if not prev_decoder_out["output_masks"].any():
+                    break
+
             # 2.1: predict
             with torch.no_grad():
                 decoder_out = self.forward_decoder(
@@ -391,27 +444,63 @@ class DPLM2Bit(DPLM2):
             output_tokens = decoder_out["output_tokens"]
             output_scores = decoder_out["output_scores"]
 
-            # 2.2: re-mask skeptical parts of low confidence
+            # 2.2: re-mask / unmask
             non_special_sym_mask = self.get_non_special_symbol_mask(
                 prev_decoder_out["output_tokens"], partial_masks=partial_masks
             )
 
-            (
-                output_masks,
-                result_tokens,
-                result_scores,
-            ) = self._reparam_decoding(
-                output_tokens=prev_decoder_out["output_tokens"].clone(),
-                output_scores=prev_decoder_out["output_scores"].clone(),
-                cur_tokens=output_tokens.clone(),
-                cur_scores=output_scores.clone(),
-                decoding_strategy=f"reparam-{remasking_strategy}-{unmasking_strategy}-linear",
-                xt_neq_x0=prev_decoder_out["output_masks"],
-                type_ids=prev_decoder_out["type_ids"].clone(),
-                non_special_sym_mask=non_special_sym_mask,
-                t=step + 1,
-                max_step=max_iter,
+            if strategy_name == "reparam":
+                (
+                    output_masks,
+                    result_tokens,
+                    result_scores,
+                ) = self._reparam_decoding(
+                    output_tokens=prev_decoder_out["output_tokens"].clone(),
+                    output_scores=prev_decoder_out["output_scores"].clone(),
+                    cur_tokens=output_tokens.clone(),
+                    cur_scores=output_scores.clone(),
+                    decoding_strategy=f"reparam-{remasking_strategy}-{unmasking_strategy}-linear",
+                    xt_neq_x0=prev_decoder_out["output_masks"],
+                    type_ids=prev_decoder_out["type_ids"].clone(),
+                    non_special_sym_mask=non_special_sym_mask,
+                    t=step + 1,
+                    max_step=max_iter,
+                )
+            else:
+                (
+                    output_masks,
+                    result_tokens,
+                    result_scores,
+                ) = self._apply_new_strategy(
+                    strategy_name=strategy_name,
+                    strategy_kwargs=strategy_kwargs,
+                    strategy_state=strategy_state,
+                    prev_tokens=prev_decoder_out["output_tokens"].clone(),
+                    prev_scores=prev_decoder_out["output_scores"].clone(),
+                    cur_tokens=output_tokens.clone(),
+                    cur_scores=output_scores.clone(),
+                    cur_log_probs=decoder_out.get("logits"),
+                    xt_neq_x0=prev_decoder_out["output_masks"],
+                    type_ids=prev_decoder_out["type_ids"].clone(),
+                    non_special_sym_mask=non_special_sym_mask,
+                    step=step,
+                )
+
+            # Final step or LRD convergence: force-unmask remaining
+            is_final = (step == max_iter - 1)
+            lrd_converged = (
+                strategy_name == "lrd"
+                and strategy_state.get("lrd_aa", LRDState()).converged
+                and strategy_state.get("lrd_struct", LRDState()).converged
             )
+            if strategy_name != "reparam" and (is_final or lrd_converged):
+                still_masked = output_masks & non_special_sym_mask
+                if still_masked.any():
+                    raw_tokens = decoder_out["output_tokens"]
+                    raw_scores = decoder_out["output_scores"]
+                    result_tokens[still_masked] = raw_tokens[still_masked]
+                    result_scores[still_masked] = raw_scores[still_masked]
+                    output_masks = output_masks & ~still_masked
 
             prev_decoder_out.update(output_masks=output_masks)
             output_tokens = result_tokens
