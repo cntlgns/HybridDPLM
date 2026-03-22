@@ -111,7 +111,14 @@ class KLASSState:
 
         # KL(cur || prev) = sum_v cur(v) * (log cur(v) - log prev(v))
         cur_probs = cur_lp.exp()
-        kl = (cur_probs * (cur_lp - prev_lp)).sum(dim=-1)  # [B, L]
+        # import ipdb; ipdb.set_trace()
+        # kl = (cur_probs * (cur_lp - prev_lp)) if cur_probs > 0 else 0, sum over vocab
+        kl = torch.where(
+            cur_probs > 0,
+            cur_probs * (cur_lp - prev_lp),
+            torch.zeros_like(cur_probs),
+        ).sum(dim=-1)  # [B, L]
+
         kl = kl.clamp(min=0.0)  # numerical safety
 
         self.kl_buffer.append(kl)
@@ -592,17 +599,17 @@ def decode_punt(
 class LRDState:
     """Tracks KL divergence for LRD's early stopping criterion.
 
-    Monitors mean KL(p_t || p_{t-1}) across all masked positions.
-    When this drops below tau_decode, signals convergence.
+    Monitors mean KL(p_t || p_{t-1}) per sample across masked positions.
+    When a sample's mean KL drops below tau_decode, that sample is converged.
     """
 
     def __init__(self):
         self.prev_log_probs = None  # [B, L, V] from previous step
-        self.converged = False
+        self.converged = None       # [B] bool tensor, per-sample convergence
 
     def update(self, cur_log_probs, masked_positions,
                tau_decode=0.1, valid_vocab_mask=None):
-        """Update KL tracking and check convergence.
+        """Update KL tracking and check convergence per sample.
 
         Args:
             cur_log_probs: [B, L, V] current step log-probabilities
@@ -611,11 +618,15 @@ class LRDState:
             valid_vocab_mask: [V] bool, restrict KL to valid vocab
 
         Returns:
-            converged: bool
+            converged: [B] bool tensor
         """
+        B = cur_log_probs.shape[0]
+        device = cur_log_probs.device
+
         if self.prev_log_probs is None:
             self.prev_log_probs = cur_log_probs.detach().clone()
-            return False
+            self.converged = torch.zeros(B, dtype=torch.bool, device=device)
+            return self.converged
 
         cur_lp = cur_log_probs
         prev_lp = self.prev_log_probs
@@ -625,17 +636,21 @@ class LRDState:
 
         # KL(cur || prev) per position
         cur_p = cur_lp.exp()
-        kl_per_pos = (cur_p * (cur_lp - prev_lp)).sum(dim=-1)  # [B, L]
+        kl_per_pos = torch.where(cur_p > 0, cur_p * (cur_lp - prev_lp), torch.zeros_like(cur_p)).sum(dim=-1)  # [B, L]
         kl_per_pos = kl_per_pos.clamp(min=0.0)
 
-        # Mean KL over masked positions only
-        if masked_positions.any():
-            mean_kl = kl_per_pos[masked_positions].mean().item()
-        else:
-            mean_kl = 0.0
+        # Mean KL per sample over masked positions only
+        kl_masked = kl_per_pos * masked_positions.float()            # [B, L]
+        n_masked = masked_positions.float().sum(dim=-1).clamp(min=1.0)  # [B]
+        mean_kl_per_sample = kl_masked.sum(dim=-1) / n_masked        # [B]
+
+        # Samples with no masked positions are considered converged
+        no_masked = ~masked_positions.any(dim=-1)                     # [B]
+        self.converged = (mean_kl_per_sample < tau_decode) | no_masked
 
         self.prev_log_probs = cur_log_probs.detach().clone()
-        self.converged = mean_kl < tau_decode
+        # if (mean_kl_per_sample < tau_decode).sum() > 0:
+        #     import ipdb; ipdb.set_trace()
         return self.converged
 
 
@@ -675,10 +690,16 @@ def decode_lrd(
     if not masked_positions.any():
         return xt_neq_x0, output_tokens, output_scores
 
-    # Update KL tracking (for early stopping signal)
-    lrd_state.update(
+    # Update KL tracking (for early stopping signal, per-sample)
+    sample_converged = lrd_state.update(
         cur_log_probs, masked_positions, tau_decode, valid_vocab_mask
-    )
+    )  # [B]
+
+    # For converged samples, force-unmask all remaining masked positions
+    converged_mask = sample_converged.unsqueeze(-1) & masked_positions  # [B, L]
+
+    # For non-converged samples, do entropy-based top-k selection
+    non_converged_masked = ~sample_converged.unsqueeze(-1) & masked_positions  # [B, L]
 
     # Compute entropy per position over valid vocab only
     if valid_vocab_mask is not None:
@@ -688,22 +709,22 @@ def decode_lrd(
     valid_p = valid_lp.exp()
     entropy = -(valid_p * valid_lp).sum(dim=-1)  # [B, L]
 
-    # Set entropy to +inf for non-masked positions so they're never selected
-    entropy = entropy.masked_fill(~masked_positions, float('inf'))
+    # Set entropy to +inf for non-selectable positions
+    entropy = entropy.masked_fill(~non_converged_masked, float('inf'))
 
-    # Select top-k lowest entropy positions per sample
+    # Select top-k lowest entropy positions per non-converged sample
     B = output_tokens.shape[0]
-    to_unmask = torch.zeros_like(xt_neq_x0)
+    topk_unmask = torch.zeros_like(xt_neq_x0)
     for b in range(B):
-        if not masked_positions[b].any():
+        if sample_converged[b] or not non_converged_masked[b].any():
             continue
-        n_masked = masked_positions[b].sum().item()
+        n_masked = non_converged_masked[b].sum().item()
         actual_k = min(k, n_masked)
-        # topk on negative entropy = lowest entropy positions
         _, topk_idx = (-entropy[b]).topk(actual_k)
-        to_unmask[b, topk_idx] = True
+        topk_unmask[b, topk_idx] = True
 
-    to_unmask = to_unmask & masked_positions
+    # Combine: converged samples unmask all, others unmask top-k
+    to_unmask = (converged_mask | topk_unmask) & masked_positions
 
     output_tokens[to_unmask] = cur_tokens[to_unmask]
     output_scores[to_unmask] = cur_scores[to_unmask]

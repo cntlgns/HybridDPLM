@@ -486,14 +486,10 @@ class DPLM2Bit(DPLM2):
                     step=step,
                 )
 
-            # Final step or LRD convergence: force-unmask remaining
+            # Final step: force-unmask remaining
+            # (LRD convergence is handled per-sample inside decode_lrd)
             is_final = (step == max_iter - 1)
-            lrd_converged = (
-                strategy_name == "lrd"
-                and strategy_state.get("lrd_aa", LRDState()).converged
-                and strategy_state.get("lrd_struct", LRDState()).converged
-            )
-            if strategy_name != "reparam" and (is_final or lrd_converged):
+            if strategy_name != "reparam" and is_final:
                 still_masked = output_masks & non_special_sym_mask
                 if still_masked.any():
                     raw_tokens = decoder_out["output_tokens"]
