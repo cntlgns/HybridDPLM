@@ -253,6 +253,7 @@ def unconditional_generate(args):
                     unmasking_strategy=args.unmasking_strategy,
                     sampling_strategy=args.sampling_strategy,
                     remasking_strategy=args.remasking_strategy,
+                    decoding_strategy=args.decoding_strategy,
                 )
                 if args.task == "backbone_generation":
                     outputs["output_tokens"] = torch.cat(
@@ -324,7 +325,6 @@ def conditional_generate_from_fasta(args):
     batches, name_lists = initialize_conditional_generation(
         args.input_fasta_path, tokenizer, device, args=args, model=model
     )
-    import ipdb; ipdb.set_trace()
 
 # ipdb> batches[0]['input_tokens'][0]
 # tensor([  33, 8024, 3768, 7068, 2972, 5722, 7197, 7861, 4444, 4925,  279,  534,
@@ -360,6 +360,7 @@ def conditional_generate_from_fasta(args):
                 sampling_strategy=args.sampling_strategy,
                 partial_masks=batch["partial_mask"],
                 remasking_strategy=args.remasking_strategy,
+                decoding_strategy=args.decoding_strategy,
             )
 
         save_results(
@@ -556,6 +557,16 @@ def main():
     parser.add_argument("--batch_size", type=int, default=50)
     parser.add_argument("--save_pdb", type=bool, default=True)
     parser.add_argument("--bit_model", action="store_true")
+    parser.add_argument(
+        "--decoding_strategy",
+        type=str,
+        default=None,
+        help=(
+            "New decoding strategy. If None, uses legacy reparam decoding. "
+            "Options: dinfer_threshold@0.8, klass@0.01:0.9:2:1, "
+            "dinfer_credit@0.8:0.8:0.2:0.7, dinfer_hierarchical@0.92:0.62, punt@0.04"
+        ),
+    )
 
     # generation options
     ## task option

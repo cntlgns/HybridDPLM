@@ -15,6 +15,19 @@ from omegaconf import OmegaConf
 from byprot.datamodules.dataset.tokenized_protein import DPLM2Tokenizer
 from byprot.models.dplm2.modules.dplm2_modeling_esm import *
 from byprot.models.utils import *
+from byprot.models.dplm2.decoding_strategies import (
+    parse_strategy_name,
+    parse_strategy_kwargs,
+    decode_dinfer_threshold,
+    decode_dinfer_hierarchical,
+    decode_dinfer_credit,
+    decode_klass,
+    decode_punt,
+    decode_lrd,
+    KLASSState,
+    CreditState,
+    LRDState,
+)
 
 
 def exists(obj):
@@ -618,6 +631,7 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
             max_step=max_step,
             history=history,
             hidden_states=net_out["last_hidden_state"],
+            logits=logits,  # [B, L, V] log-softmax for new decoding strategies
         )
 
     def get_non_special_symbol_mask(self, output_tokens, partial_masks=None):
@@ -843,15 +857,20 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
         unmasking_strategy="stochastic1.0",  # [stochastic{temperature}, deterministic]
         sampling_strategy="annealing@2.0:0.1",
         remasking_strategy="uncond",  # [uncond, cond, no_remask]
+        decoding_strategy=None,  # e.g. "dinfer_threshold@0.8", "klass@0.01:0.9:2:1", etc.
     ):
         self.eval()
         max_iter = max_iter
         temperature = temperature
 
+        # Determine which decoding path to use
+        if decoding_strategy is None:
+            strategy_name = "reparam"
+        else:
+            strategy_name = parse_strategy_name(decoding_strategy)
+
         # 0) encoding
         encoder_out = self.forward_encoder(input_tokens)
-        # ipdb> encoder_out
-        # {}
         # 1) initialized from all mask tokens
         (
             initial_output_tokens,
@@ -859,7 +878,6 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
         ) = self.initialize_output_tokens(
             input_tokens, encoder_out=encoder_out, partial_masks=partial_masks
         )
-        # initial_output_tokens == input_tokens 
         prev_decoder_out = dict(
             output_tokens=initial_output_tokens,
             output_scores=initial_output_scores,
@@ -875,48 +893,39 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
         prev_decoder_out["output_masks"] = self.get_non_special_symbol_mask(
             prev_decoder_out["output_tokens"], partial_masks=partial_masks
         )
-        # ipdb> prev_decoder_out
-        # {'output_tokens': tensor([[  33, 8024, 3768,  ...,    1,    1,    1],
-        # [  33, 1980, 2036,  ...,    1,    1,    1],
-        # [  33, 7644, 6750,  ...,    1,    1,    1],
-        # ...,
-        # [  33, 6365, 2271,  ...,    1,    1,    1],
-        # [  33, 7260, 1376,  ...,    1,    1,    1],
-        # [  33, 7596, 3532,  ...,   32,   32,    2]], device='cuda:0'), 
-        # 'output_scores': tensor([[0., 0., 0.,  ..., 0., 0., 0.],
-        # [0., 0., 0.,  ..., 0., 0., 0.],
-        # [0., 0., 0.,  ..., 0., 0., 0.],
-        # ...,
-        # [0., 0., 0.,  ..., 0., 0., 0.],
-        # [0., 0., 0.,  ..., 0., 0., 0.],
-        # [0., 0., 0.,  ..., 0., 0., 0.]], device='cuda:0'), 
-        # 'output_masks': tensor([[False, False, False,  ..., False, False, False],
-        # [False, False, False,  ..., False, False, False],
-        # [False, False, False,  ..., False, False, False],
-        # ...,
-        # [False, False, False,  ..., False, False, False],
-        # [False, False, False,  ..., False, False, False],
-        # [False, False, False,  ...,  True,  True, False]], device='cuda:0'),
-        # # True for mask_aa, False for else including cls_aa, eos_aa 
-        # 'attentions': None, 'step': 0, 'max_step': 100, 
-        # 'history': [tensor([[  33, 8024, 3768,  ...,    1,    1,    1],
-        # [  33, 1980, 2036,  ...,    1,    1,    1],
-        # [  33, 7644, 6750,  ...,    1,    1,    1],
-        # ...,
-        # [  33, 6365, 2271,  ...,    1,    1,    1],
-        # [  33, 7260, 1376,  ...,    1,    1,    1],
-        # [  33, 7596, 3532,  ...,   32,   32,    2]], device='cuda:0')], 
-        # 'temperature': 1.0, 
-        # 'type_ids': tensor([[0, 0, 0,  ..., 2, 2, 2],
-        # [0, 0, 0,  ..., 2, 2, 2],
-        # [0, 0, 0,  ..., 2, 2, 2],
-        # ...,
-        # [0, 0, 0,  ..., 2, 2, 2],
-        # [0, 0, 0,  ..., 2, 2, 2],
-        # [0, 0, 0,  ..., 1, 1, 1]], device='cuda:0', dtype=torch.int32)}
-        # # 0: struct token(including cls, eos), 1: aa token(including cls, eos), 2: padding token
+
+        # --- Initialize strategy-specific state ---
+        strategy_kwargs = parse_strategy_kwargs(decoding_strategy) if decoding_strategy else {}
+        strategy_state = {}
+        B, L = initial_output_tokens.shape
+
+        if strategy_name == "klass":
+            n = strategy_kwargs.get("n", 2)
+            strategy_state["klass_aa"] = KLASSState(n=n)
+            strategy_state["klass_struct"] = KLASSState(n=n)
+            strategy_state["prev_log_probs"] = None
+        elif strategy_name == "dinfer_credit":
+            V = getattr(self.cfg, "vocab_size", None) or getattr(self.cfg.tokenizer, "vocab_size", 8229)
+            strategy_state["credit_aa"] = CreditState(
+                B, L, V, initial_output_tokens.device,
+                beta=strategy_kwargs.get("beta", 0.8),
+                gamma=strategy_kwargs.get("gamma", 0.2),
+            )
+            strategy_state["credit_struct"] = CreditState(
+                B, L, V, initial_output_tokens.device,
+                beta=strategy_kwargs.get("beta", 0.8),
+                gamma=strategy_kwargs.get("gamma", 0.2),
+            )
+        elif strategy_name == "lrd":
+            strategy_state["lrd_aa"] = LRDState()
+            strategy_state["lrd_struct"] = LRDState()
 
         for step in tqdm(range(max_iter), desc="Decoding"):
+            # Early stopping: if nothing is masked, stop
+            if strategy_name != "reparam":
+                if not prev_decoder_out["output_masks"].any():
+                    break
+
             # 2.1: predict
             with torch.no_grad():
                 decoder_out = self.forward_decoder(
@@ -924,38 +933,66 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
                     partial_masks=partial_masks,
                     sampling_strategy=sampling_strategy,
                 )
-            # import ipdb; ipdb.set_trace()
 
             output_tokens = decoder_out["output_tokens"]
             output_scores = decoder_out["output_scores"]
 
-            # 2.2: re-mask skeptical parts of low confidence
+            # 2.2: re-mask / unmask
             non_special_sym_mask = self.get_non_special_symbol_mask(
                 prev_decoder_out["output_tokens"], partial_masks=partial_masks
             )
-            # non_special_sym_mask: [B, L] boolean tensor, True for valid positions, False for positions cls, eos, pad
-            # import ipdb; ipdb.set_trace()
 
-            (
-                output_masks,
-                result_tokens,
-                result_scores,
-            ) = self._reparam_decoding(
-                output_tokens=prev_decoder_out["output_tokens"].clone(),
-                output_scores=prev_decoder_out["output_scores"].clone(),
-                cur_tokens=output_tokens.clone(),
-                cur_scores=output_scores.clone(),
-                decoding_strategy=f"reparam-{remasking_strategy}-{unmasking_strategy}-linear",
-                xt_neq_x0=prev_decoder_out["output_masks"],
-                type_ids=prev_decoder_out["type_ids"].clone(),
-                non_special_sym_mask=non_special_sym_mask,
-                t=step + 1,
-                max_step=max_iter,
-            )
-            # output_masks: [B, L] bool, True for positions that are masked, False for positions that are unmasked
-            # result_tokens: [B, L] int, the new output tokens after reparameterized decoding / highest output_scores index is unmasked
-            # result_scores: [B, L] float, the new output scores after reparameterized decoding / unmasked index -> original output_scores, masked index -> -inf
-            # _reparam_decoding: 
+            if strategy_name == "reparam":
+                # Legacy path
+                (
+                    output_masks,
+                    result_tokens,
+                    result_scores,
+                ) = self._reparam_decoding(
+                    output_tokens=prev_decoder_out["output_tokens"].clone(),
+                    output_scores=prev_decoder_out["output_scores"].clone(),
+                    cur_tokens=output_tokens.clone(),
+                    cur_scores=output_scores.clone(),
+                    decoding_strategy=f"reparam-{remasking_strategy}-{unmasking_strategy}-linear",
+                    xt_neq_x0=prev_decoder_out["output_masks"],
+                    type_ids=prev_decoder_out["type_ids"].clone(),
+                    non_special_sym_mask=non_special_sym_mask,
+                    t=step + 1,
+                    max_step=max_iter,
+                )
+            else:
+                # New strategy path: apply per modality (AA / struct)
+                (
+                    output_masks,
+                    result_tokens,
+                    result_scores,
+                ) = self._apply_new_strategy(
+                    strategy_name=strategy_name,
+                    strategy_kwargs=strategy_kwargs,
+                    strategy_state=strategy_state,
+                    prev_tokens=prev_decoder_out["output_tokens"].clone(),
+                    prev_scores=prev_decoder_out["output_scores"].clone(),
+                    cur_tokens=output_tokens.clone(),
+                    cur_scores=output_scores.clone(),
+                    cur_log_probs=decoder_out.get("logits"),
+                    xt_neq_x0=prev_decoder_out["output_masks"],
+                    type_ids=prev_decoder_out["type_ids"].clone(),
+                    non_special_sym_mask=non_special_sym_mask,
+                    step=step,
+                )
+
+            # Final step: force-unmask remaining
+            # (LRD convergence is handled per-sample inside decode_lrd)
+            is_final = (step == max_iter - 1)
+            if strategy_name != "reparam" and is_final:
+                still_masked = output_masks & non_special_sym_mask
+                if still_masked.any():
+                    raw_tokens = decoder_out["output_tokens"]
+                    raw_scores = decoder_out["output_scores"]
+                    result_tokens[still_masked] = raw_tokens[still_masked]
+                    result_scores[still_masked] = raw_scores[still_masked]
+                    output_masks = output_masks & ~still_masked
+
             prev_decoder_out.update(output_masks=output_masks)
             output_tokens = result_tokens
             output_scores = result_scores
@@ -966,9 +1003,180 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
                 step=step + 1,
                 history=decoder_out["history"],
             )
-            # print(result_tokens[1][130:163]) # for cameo2022, we can check how it gets generated step by step
 
         decoder_out = prev_decoder_out
         return {
             "output_tokens": decoder_out["output_tokens"],
         }
+
+    def _apply_new_strategy(
+        self,
+        strategy_name,
+        strategy_kwargs,
+        strategy_state,
+        prev_tokens,
+        prev_scores,
+        cur_tokens,
+        cur_scores,
+        cur_log_probs,
+        xt_neq_x0,
+        type_ids,
+        non_special_sym_mask,
+        step,
+    ):
+        """Apply a new decoding strategy per modality (AA / struct separately)."""
+        output_tokens = prev_tokens
+        output_scores = prev_scores
+
+        aa_position = type_ids.eq(self.aa_type) & non_special_sym_mask
+        struct_position = type_ids.eq(self.struct_type) & non_special_sym_mask
+        new_xt_neq_x0 = xt_neq_x0.clone()
+
+        # Build per-modality valid vocab mask for distribution comparisons.
+        # Only "real" tokens are valid; exclude the other modality's range and
+        # all special tokens (cls, eos, pad, mask, unk, X, B, U, Z, O).
+        V = cur_log_probs.shape[-1] if cur_log_probs is not None else 8229
+        special_set = set(self.special_token_list)
+
+        for modality, pos_mask in [("aa", aa_position), ("struct", struct_position)]:
+            if not pos_mask.any():
+                continue
+            mask_id = self.aa_mask_id if modality == "aa" else self.struct_mask_id
+
+            valid_vocab_mask = torch.zeros(V, dtype=torch.bool, device=cur_tokens.device)
+            if modality == "aa":
+                valid_vocab_mask[:33] = True
+            else:
+                valid_vocab_mask[33:] = True
+            for sp in special_set:
+                if sp < V:
+                    valid_vocab_mask[sp] = False
+
+            xt_mod = xt_neq_x0 & pos_mask
+
+            if strategy_name == "dinfer_threshold":
+                new_xt_mod, output_tokens, output_scores = decode_dinfer_threshold(
+                    output_tokens=output_tokens,
+                    output_scores=output_scores,
+                    cur_tokens=cur_tokens,
+                    cur_scores=cur_scores,
+                    xt_neq_x0=xt_mod,
+                    non_special_sym_mask=pos_mask,
+                    mask_id=mask_id,
+                    **strategy_kwargs,
+                )
+
+            elif strategy_name == "klass":
+                klass_key = f"klass_{modality}"
+                klass_st = strategy_state[klass_key]
+                prev_lp = strategy_state.get("prev_log_probs")
+
+                kw = {k: v for k, v in strategy_kwargs.items() if k != "n"}
+                new_xt_mod, output_tokens, output_scores = decode_klass(
+                    output_tokens=output_tokens,
+                    output_scores=output_scores,
+                    cur_tokens=cur_tokens,
+                    cur_scores=cur_scores,
+                    xt_neq_x0=xt_mod,
+                    non_special_sym_mask=pos_mask,
+                    mask_id=mask_id,
+                    klass_state=klass_st,
+                    cur_log_probs=cur_log_probs,
+                    prev_log_probs=prev_lp,
+                    valid_vocab_mask=valid_vocab_mask,
+                    **kw,
+                )
+
+            elif strategy_name == "dinfer_credit":
+                credit_key = f"credit_{modality}"
+                credit_st = strategy_state[credit_key]
+                kw = {k: v for k, v in strategy_kwargs.items()
+                      if k not in ("beta", "gamma")}
+                new_xt_mod, output_tokens, output_scores = decode_dinfer_credit(
+                    output_tokens=output_tokens,
+                    output_scores=output_scores,
+                    cur_tokens=cur_tokens,
+                    cur_scores=cur_scores,
+                    xt_neq_x0=xt_mod,
+                    non_special_sym_mask=pos_mask,
+                    mask_id=mask_id,
+                    credit_state=credit_st,
+                    cur_log_probs=cur_log_probs,
+                    valid_vocab_mask=valid_vocab_mask,
+                    **kw,
+                )
+
+            elif strategy_name == "dinfer_hierarchical":
+                new_xt_mod, output_tokens, output_scores = decode_dinfer_hierarchical(
+                    output_tokens=output_tokens,
+                    output_scores=output_scores,
+                    cur_tokens=cur_tokens,
+                    cur_scores=cur_scores,
+                    xt_neq_x0=xt_mod,
+                    non_special_sym_mask=pos_mask,
+                    mask_id=mask_id,
+                    **strategy_kwargs,
+                )
+
+            elif strategy_name == "punt":
+                def forward_fn(input_ids, _self=self, _pos_mask=pos_mask):
+                    """Run forward with same post-processing as forward_decoder."""
+                    net_out = _self.forward(input_ids=input_ids)
+                    logits = net_out["logits"].log_softmax(dim=-1)
+                    _type_ids = _self.get_modality_type(input_ids)
+                    _output_masks = _self.get_non_special_symbol_mask(input_ids)
+                    _aa_pos = _type_ids.eq(_self.aa_type) & _output_masks
+                    _struct_pos = _type_ids.eq(_self.struct_type) & _output_masks
+                    _idx_aa = torch.where(_aa_pos)
+                    _idx_struct = torch.where(_struct_pos)
+                    logits[_idx_aa[0], _idx_aa[1], 33:] = -math.inf
+                    logits[_idx_struct[0], _idx_struct[1], :33] = -math.inf
+                    logits[..., _self.special_token_list] = -math.inf
+                    if _output_masks.any():
+                        logits[_output_masks] = top_k_top_p_filtering(
+                            logits[_output_masks].unsqueeze(0), top_p=0.95
+                        ).squeeze(0)
+                    return {"logits": logits}
+
+                new_xt_mod, output_tokens, output_scores = decode_punt(
+                    output_tokens=output_tokens,
+                    output_scores=output_scores,
+                    cur_tokens=cur_tokens,
+                    cur_scores=cur_scores,
+                    xt_neq_x0=xt_mod,
+                    non_special_sym_mask=pos_mask,
+                    mask_id=mask_id,
+                    baseline_log_probs=cur_log_probs,
+                    forward_fn=forward_fn,
+                    valid_vocab_mask=valid_vocab_mask,
+                    **strategy_kwargs,
+                )
+            elif strategy_name == "lrd":
+                lrd_key = f"lrd_{modality}"
+                lrd_st = strategy_state[lrd_key]
+                new_xt_mod, output_tokens, output_scores = decode_lrd(
+                    output_tokens=output_tokens,
+                    output_scores=output_scores,
+                    cur_tokens=cur_tokens,
+                    cur_scores=cur_scores,
+                    xt_neq_x0=xt_mod,
+                    non_special_sym_mask=pos_mask,
+                    mask_id=mask_id,
+                    cur_log_probs=cur_log_probs,
+                    lrd_state=lrd_st,
+                    valid_vocab_mask=valid_vocab_mask,
+                    **strategy_kwargs,
+                )
+
+            else:
+                raise ValueError(f"Unknown decoding strategy: {strategy_name}")
+
+            # Merge modality mask back
+            new_xt_neq_x0 = new_xt_neq_x0 & ~pos_mask  # clear modality bits
+            new_xt_neq_x0 = new_xt_neq_x0 | new_xt_mod  # set new modality mask
+
+        # Update prev_log_probs for KLASS
+        if strategy_name == "klass" and cur_log_probs is not None:
+            strategy_state["prev_log_probs"] = cur_log_probs.clone()
+
+        return new_xt_neq_x0, output_tokens, output_scores
