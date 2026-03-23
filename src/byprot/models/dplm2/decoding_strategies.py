@@ -593,65 +593,115 @@ def decode_punt(
 
 
 # ---------------------------------------------------------------------------
-# Strategy 6: LRD (Latent Refinement Decoding) - Phase 2 Predictive Feedback
+# Strategy 6: LRD (Latent Refinement Decoding)
+#   Phase 1: Latent Refinement - refine soft embeddings without unmasking
+#   Phase 2: Predictive Feedback Loop - entropy-based unmasking with early stop
 # ---------------------------------------------------------------------------
 
 class LRDState:
-    """Tracks KL divergence for LRD's early stopping criterion.
+    """Manages per-sample two-phase LRD decoding state.
 
-    Monitors mean KL(p_t || p_{t-1}) per sample across masked positions.
-    When a sample's mean KL drops below tau_decode, that sample is converged.
+    Phase 1 (Latent Refinement):
+        Iteratively refines predictive distributions via soft embedding
+        propagation without committing any tokens. Per-sample transition
+        to Phase 2 when mean KL < tau_refine or after T_refine steps.
+
+    Phase 2 (Predictive Feedback Loop):
+        Progressively unmasks lowest-entropy positions while keeping remaining
+        positions in soft form. KL monitoring enables per-sample early stopping
+        when KL < tau_decode.
     """
 
-    def __init__(self):
+    def __init__(self, tau_refine=0.1, T_refine=20):
+        self.tau_refine = tau_refine
+        self.T_refine = T_refine
+        self.refine_step = 0
+        # Per-sample phase: initialized lazily on first call as [B] int tensor
+        # 1 = Phase 1 (latent refinement), 2 = Phase 2 (predictive feedback)
+        self.phase = None           # [B] int tensor
         self.prev_log_probs = None  # [B, L, V] from previous step
-        self.converged = None       # [B] bool tensor, per-sample convergence
+        self.converged = None       # [B] bool tensor (Phase 2 early stopping)
 
-    def update(self, cur_log_probs, masked_positions,
-               tau_decode=0.1, valid_vocab_mask=None):
-        """Update KL tracking and check convergence per sample.
+    def _ensure_init(self, B, device):
+        """Lazily initialize per-sample state on first call."""
+        if self.phase is None:
+            self.phase = torch.ones(B, dtype=torch.long, device=device)  # all start in Phase 1
+            self.converged = torch.zeros(B, dtype=torch.bool, device=device)
 
-        Args:
-            cur_log_probs: [B, L, V] current step log-probabilities
-            masked_positions: [B, L] bool, currently masked positions
-            tau_decode: KL threshold for early stopping
-            valid_vocab_mask: [V] bool, restrict KL to valid vocab
+    def _compute_mean_kl(self, cur_log_probs, prev_log_probs,
+                         masked_positions, valid_vocab_mask=None):
+        """Compute mean KL(cur || prev) per sample over masked positions.
 
         Returns:
-            converged: [B] bool tensor
+            mean_kl_per_sample: [B] tensor
         """
-        B = cur_log_probs.shape[0]
-        device = cur_log_probs.device
-
-        if self.prev_log_probs is None:
-            self.prev_log_probs = cur_log_probs.detach().clone()
-            self.converged = torch.zeros(B, dtype=torch.bool, device=device)
-            return self.converged
-
         cur_lp = cur_log_probs
-        prev_lp = self.prev_log_probs
+        prev_lp = prev_log_probs
         if valid_vocab_mask is not None:
             cur_lp = cur_lp[..., valid_vocab_mask].log_softmax(dim=-1)
             prev_lp = prev_lp[..., valid_vocab_mask].log_softmax(dim=-1)
 
-        # KL(cur || prev) per position
         cur_p = cur_lp.exp()
-        kl_per_pos = torch.where(cur_p > 0, cur_p * (cur_lp - prev_lp), torch.zeros_like(cur_p)).sum(dim=-1)  # [B, L]
-        kl_per_pos = kl_per_pos.clamp(min=0.0)
+        kl_per_pos = torch.where(
+            cur_p > 0,
+            cur_p * (cur_lp - prev_lp),
+            torch.zeros_like(cur_p),
+        ).sum(dim=-1).clamp(min=0.0)  # [B, L]
 
-        # Mean KL per sample over masked positions only
-        kl_masked = kl_per_pos * masked_positions.float()            # [B, L]
-        n_masked = masked_positions.float().sum(dim=-1).clamp(min=1.0)  # [B]
-        mean_kl_per_sample = kl_masked.sum(dim=-1) / n_masked        # [B]
+        kl_masked = kl_per_pos * masked_positions.float()
+        n_masked = masked_positions.float().sum(dim=-1).clamp(min=1.0)
+        return kl_masked.sum(dim=-1) / n_masked  # [B]
 
-        # Samples with no masked positions are considered converged
-        no_masked = ~masked_positions.any(dim=-1)                     # [B]
-        self.converged = (mean_kl_per_sample < tau_decode) | no_masked
+    def update(self, cur_log_probs, masked_positions,
+               tau_decode=0.1, valid_vocab_mask=None):
+        """Unified update for both phases. Tracks KL, manages per-sample
+        phase transitions, and returns per-sample convergence status.
+
+        Phase 1 samples: check KL convergence -> transition to Phase 2
+        Phase 2 samples: check KL early stopping -> mark as converged
+
+        Args:
+            cur_log_probs: [B, L, V]
+            masked_positions: [B, L] bool
+            tau_decode: KL threshold for Phase 2 early stopping
+            valid_vocab_mask: [V] bool or None
+
+        Returns:
+            in_phase1: [B] bool, True = sample is still in Phase 1 (no unmasking)
+            converged: [B] bool, True = sample is converged in Phase 2 (unmask all)
+        """
+        B = cur_log_probs.shape[0]
+        device = cur_log_probs.device
+        self._ensure_init(B, device)
+
+        in_phase1 = self.phase.eq(1)   # [B]
+        in_phase2 = self.phase.eq(2)   # [B]
+
+        if self.prev_log_probs is not None:
+            mean_kl = self._compute_mean_kl(
+                cur_log_probs, self.prev_log_probs,
+                masked_positions, valid_vocab_mask,
+            )  # [B]
+
+            # Phase 1 -> Phase 2 transition: per-sample KL < tau_refine
+            phase1_converged = in_phase1 & (mean_kl < self.tau_refine)
+            self.phase[phase1_converged] = 2
+
+            # Phase 2 early stopping: per-sample KL < tau_decode
+            no_masked = ~masked_positions.any(dim=-1)
+            self.converged = (in_phase2 & (mean_kl < tau_decode)) | no_masked
 
         self.prev_log_probs = cur_log_probs.detach().clone()
-        # if (mean_kl_per_sample < tau_decode).sum() > 0:
-        #     import ipdb; ipdb.set_trace()
-        return self.converged
+
+        # Phase 1 step counting: force transition after T_refine steps
+        self.refine_step += 1
+        if self.refine_step >= self.T_refine:
+            still_phase1 = self.phase.eq(1)
+            self.phase[still_phase1] = 2
+
+        # Return updated phase info
+        in_phase1 = self.phase.eq(1)
+        return in_phase1, self.converged
 
 
 def decode_lrd(
@@ -667,20 +717,29 @@ def decode_lrd(
     tau_decode=0.1,
     k=1,
     valid_vocab_mask=None,
+    tau_refine=0.1,
+    T_refine=20,
 ):
-    """LRD Phase 2: unmask top-k lowest-entropy masked positions per step.
+    """LRD two-phase decoding with per-sample phase tracking.
 
-    Entropy-based selection: positions with lowest entropy (most confident)
-    are committed first. KL monitoring provides early stopping signal.
+    Phase 1 (Latent Refinement): no tokens are unmasked; only KL is tracked
+        to detect when the predictive distributions have stabilised.
+    Phase 2 (Predictive Feedback Loop): unmask top-k lowest-entropy positions
+        per step, with KL-based early stopping.
+
+    Each sample independently transitions from Phase 1 to Phase 2 when its
+    mean KL divergence drops below tau_refine (or after T_refine steps).
 
     Args:
         output_tokens, output_scores, cur_tokens, cur_scores, xt_neq_x0,
         non_special_sym_mask, mask_id: same as other strategies
         cur_log_probs: [B, L, V] current log-softmax output
-        lrd_state: LRDState object for KL tracking
-        tau_decode: KL threshold for convergence detection
-        k: number of lowest-entropy positions to unmask per step
+        lrd_state: LRDState object
+        tau_decode: KL threshold for Phase 2 early stopping
+        k: number of lowest-entropy positions to unmask per step (Phase 2)
         valid_vocab_mask: [V] bool, restrict entropy/KL to valid vocab
+        tau_refine: (unused here, kept in LRDState)
+        T_refine: (unused here, kept in LRDState)
 
     Returns:
         (new_xt_neq_x0, output_tokens, output_scores)
@@ -690,16 +749,20 @@ def decode_lrd(
     if not masked_positions.any():
         return xt_neq_x0, output_tokens, output_scores
 
-    # Update KL tracking (for early stopping signal, per-sample)
-    sample_converged = lrd_state.update(
-        cur_log_probs, masked_positions, tau_decode, valid_vocab_mask
-    )  # [B]
+    # Update KL tracking and phase transitions (per-sample)
+    in_phase1, sample_converged = lrd_state.update(
+        cur_log_probs, masked_positions, tau_decode, valid_vocab_mask,
+    )  # both [B]
 
-    # For converged samples, force-unmask all remaining masked positions
-    converged_mask = sample_converged.unsqueeze(-1) & masked_positions  # [B, L]
+    # Phase 1 samples: no unmasking
+    # Phase 2 converged samples: force-unmask all remaining
+    # Phase 2 non-converged samples: entropy-based top-k selection
+    in_phase2 = ~in_phase1
+    phase2_converged = in_phase2 & sample_converged
+    phase2_active = in_phase2 & ~sample_converged
 
-    # For non-converged samples, do entropy-based top-k selection
-    non_converged_masked = ~sample_converged.unsqueeze(-1) & masked_positions  # [B, L]
+    converged_mask = phase2_converged.unsqueeze(-1) & masked_positions   # [B, L]
+    active_masked = phase2_active.unsqueeze(-1) & masked_positions       # [B, L]
 
     # Compute entropy per position over valid vocab only
     if valid_vocab_mask is not None:
@@ -710,20 +773,20 @@ def decode_lrd(
     entropy = -(valid_p * valid_lp).sum(dim=-1)  # [B, L]
 
     # Set entropy to +inf for non-selectable positions
-    entropy = entropy.masked_fill(~non_converged_masked, float('inf'))
+    entropy = entropy.masked_fill(~active_masked, float('inf'))
 
-    # Select top-k lowest entropy positions per non-converged sample
+    # Select top-k lowest entropy positions per Phase 2 active sample
     B = output_tokens.shape[0]
     topk_unmask = torch.zeros_like(xt_neq_x0)
     for b in range(B):
-        if sample_converged[b] or not non_converged_masked[b].any():
+        if not phase2_active[b] or not active_masked[b].any():
             continue
-        n_masked = non_converged_masked[b].sum().item()
+        n_masked = active_masked[b].sum().item()
         actual_k = min(k, n_masked)
         _, topk_idx = (-entropy[b]).topk(actual_k)
         topk_unmask[b, topk_idx] = True
 
-    # Combine: converged samples unmask all, others unmask top-k
+    # Combine: converged unmask all, active unmask top-k, phase1 unmask nothing
     to_unmask = (converged_mask | topk_unmask) & masked_positions
 
     output_tokens[to_unmask] = cur_tokens[to_unmask]
@@ -733,6 +796,140 @@ def decode_lrd(
     new_xt_neq_x0[to_unmask] = False
 
     return new_xt_neq_x0, output_tokens, output_scores
+
+
+# ---------------------------------------------------------------------------
+# Soft Embedding: mix mask embedding with predicted token embeddings
+# ---------------------------------------------------------------------------
+
+def parse_feedforward_mode(feedforward_mode):
+    """Parse feedforward_mode string into (mode_name, kwargs).
+
+    Formats:
+        "discrete"              -> ("discrete", {})
+        "linear"                -> ("linear", {})
+        "linear@0.2:0.002:0.5" -> ("linear", {"init": 0.2, "growth": 0.002, "preset": 0.5})
+        "entropy"               -> ("entropy", {})
+        "entropy@0.3"           -> ("entropy", {"rf": 0.3})
+
+    Returns:
+        (mode_name, kwargs): tuple
+    """
+    parts = feedforward_mode.split("@")
+    mode_name = parts[0]
+    kwargs = {}
+    if mode_name == "linear" and len(parts) > 1:
+        vals = parts[1].split(":")
+        if len(vals) > 0:
+            kwargs["init"] = float(vals[0])
+        if len(vals) > 1:
+            kwargs["growth"] = float(vals[1])
+        if len(vals) > 2:
+            kwargs["preset"] = float(vals[2])
+    elif mode_name == "entropy" and len(parts) > 1:
+        vals = parts[1].split(":")
+        if len(vals) > 0:
+            kwargs["rf"] = float(vals[0])
+    return mode_name, kwargs
+
+
+def compute_soft_embeds(
+    input_embeds,
+    log_probs,
+    word_embed_weight,
+    masked_positions,
+    mask_emb_mode="add",
+    feedforward_mode="discrete",
+    step=0,
+    max_step=1,
+    valid_vocab_mask=None,
+):
+    """Compute soft embeddings for masked positions.
+
+    For masked positions, mix the mask embedding with the expected token
+    embedding from the predicted distribution.
+
+    Args:
+        input_embeds: [B, L, D] current embeddings (with mask emb at masked pos)
+        log_probs: [B, L, V] log-softmax output from previous forward
+        word_embed_weight: [V, D] token embedding weight matrix
+        masked_positions: [B, L] bool, True = still masked
+        mask_emb_mode: how to mix mask and expected token embeddings
+            "add": e_mask + alpha * E[e_v]  (dInfer IterSmooth)
+            "replace": (1-alpha) * e_mask + alpha * E[e_v]  (LRD)
+        feedforward_mode: how to compute mixing weight alpha
+            "discrete": no soft embedding, return input_embeds as-is (default)
+            "linear": alpha increases with step  (dInfer IterSmooth)
+            "linear@init:growth:preset": linear with custom hyperparameters
+            "entropy": alpha = rf * (1 - H_norm) per position  (LRD)
+        step: current step index
+        max_step: total number of steps
+        valid_vocab_mask: [V] bool, restrict to valid vocab tokens
+
+    Returns:
+        soft_embeds: [B, L, D] with soft embeddings at masked positions
+    """
+    mode_name, mode_kwargs = parse_feedforward_mode(feedforward_mode)
+
+    if mode_name == "discrete":
+        return input_embeds
+
+    if not masked_positions.any():
+        return input_embeds
+
+    if valid_vocab_mask is not None:
+        lp = log_probs[..., valid_vocab_mask]
+        W = word_embed_weight[valid_vocab_mask]  # [V', D]
+    else:
+        lp = log_probs
+        W = word_embed_weight  # [V, D]
+
+    lp = lp.log_softmax(dim=-1)
+    probs = lp.exp()  # [B, L, V']
+
+    # Expected token embedding: E[e_v] = probs @ W
+    B, L, D = input_embeds.shape
+    expected_emb = torch.zeros(B, L, D, dtype=input_embeds.dtype,
+                               device=input_embeds.device)
+    for b in range(B):
+        mask_b = masked_positions[b]
+        if mask_b.any():
+            expected_emb[b, mask_b] = (probs[b, mask_b].to(W.dtype) @ W).to(expected_emb.dtype)
+
+    # Compute alpha
+    if mode_name == "linear":
+        # dInfer IterSmooth style
+        alpha_init = mode_kwargs.get("init", 0.1)
+        alpha_growth = mode_kwargs.get("growth", 0.001)
+        alpha_preset = mode_kwargs.get("preset", 0.3)
+        alpha = min(alpha_init + alpha_growth * step, alpha_preset)
+        alpha_map = torch.full((B, L), alpha, dtype=input_embeds.dtype,
+                               device=input_embeds.device)
+    elif mode_name == "entropy":
+        # LRD style: alpha_i = rf * (1 - H_norm_i)
+        rf = mode_kwargs.get("rf", 0.2)
+        entropy = -(probs * lp).sum(dim=-1)  # [B, L]
+        V_size = probs.shape[-1]
+        H_norm = entropy / math.log(V_size) if V_size > 1 else entropy
+        H_norm = H_norm.clamp(0.0, 1.0)
+        alpha_map = rf * (1.0 - H_norm)
+        alpha_map = alpha_map.to(input_embeds.dtype)
+    else:
+        raise ValueError(f"Unknown feedforward_mode: {mode_name}")
+
+    alpha_3d = alpha_map.unsqueeze(-1)  # [B, L, 1]
+    mask_3d = masked_positions.unsqueeze(-1)  # [B, L, 1]
+
+    if mask_emb_mode == "add":
+        # dInfer: e_mask + alpha * E[e_v]
+        soft = input_embeds + alpha_3d * expected_emb
+    elif mask_emb_mode == "replace":
+        # LRD: (1 - alpha) * e_mask + alpha * E[e_v]
+        soft = (1 - alpha_3d) * input_embeds + alpha_3d * expected_emb
+    else:
+        raise ValueError(f"Unknown mask_emb_mode: {mask_emb_mode}")
+
+    return torch.where(mask_3d, soft, input_embeds)
 
 
 # ---------------------------------------------------------------------------
@@ -780,7 +977,7 @@ def parse_strategy_name(decoding_strategy):
         "dinfer_credit@0.8:0.9:0.5:1.0"        -> "dinfer_credit"
         "dinfer_hierarchical@0.92:0.62"         -> "dinfer_hierarchical"
         "punt@0.04"                             -> "punt"
-        "lrd@0.1:1"                             -> "lrd"
+        "lrd@0.1:1:0.1:20"                       -> "lrd"
 
     Returns:
         strategy_name: str
@@ -801,7 +998,7 @@ def parse_strategy_kwargs(decoding_strategy):
         "dinfer_credit@0.8:0.9:0.5:1.0" -> {"threshold": 0.8, "beta": 0.9, "gamma": 0.5, "alpha": 1.0}
         "dinfer_hierarchical@0.92:0.62"  -> {"upper_threshold": 0.92, "lower_threshold": 0.62}
         "punt@0.04"                 -> {"epsilon": 0.04}
-        "lrd@0.1:1"                 -> {"tau_decode": 0.1, "k": 1}
+        "lrd@0.1:1:0.1:20"          -> {"tau_decode": 0.1, "k": 1, "tau_refine": 0.1, "T_refine": 20}
     """
     parts = decoding_strategy.split("@")
     name = parts[0]
@@ -852,13 +1049,18 @@ def parse_strategy_kwargs(decoding_strategy):
         return {"epsilon": 0.04}
 
     elif name == "lrd":
+        # Format: lrd@tau_decode:k:tau_refine:T_refine
         if len(parts) > 1:
             vals = parts[1].split(":")
             kwargs = {"tau_decode": float(vals[0])}
             if len(vals) > 1:
                 kwargs["k"] = int(vals[1])
+            if len(vals) > 2:
+                kwargs["tau_refine"] = float(vals[2])
+            if len(vals) > 3:
+                kwargs["T_refine"] = int(vals[3])
             return kwargs
-        return {"tau_decode": 0.1, "k": 1}
+        return {"tau_decode": 0.1, "k": 1, "tau_refine": 0.1, "T_refine": 20}
 
     return {}
 
@@ -929,12 +1131,13 @@ def parse_strategy_kwargs(decoding_strategy):
 #     --saveto generation-results/decoding_test/dinfer_credit
 
 # # LRD (Latent Refinement Decoding)
+# # Format: lrd@tau_decode:k:tau_refine:T_refine
 # python generate_dplm2.py \
-#     --model_name airkingbd/dplm2_650m \
-#     --task inverse_folding \
-#     --input_fasta_path data-bin/cameo2022/struct.fasta \
-#     --max_iter 100 \
-#     --unmasking_strategy deterministic \
-#     --sampling_strategy argmax \
-#     --decoding_strategy "lrd@0.1:1" \
-#     --saveto generation-results/decoding_test/lrd
+    # --model_name airkingbd/dplm2_650m \
+    # --task inverse_folding \
+    # --input_fasta_path data-bin/cameo2022/struct.fasta \
+    # --max_iter 100 \
+    # --unmasking_strategy deterministic \
+    # --sampling_strategy argmax \
+    # --decoding_strategy "lrd@0.1:1:0.1:20" \
+    # --saveto generation-results/decoding_test/lrd

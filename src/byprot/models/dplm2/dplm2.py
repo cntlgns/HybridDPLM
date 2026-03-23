@@ -27,6 +27,7 @@ from byprot.models.dplm2.decoding_strategies import (
     KLASSState,
     CreditState,
     LRDState,
+    compute_soft_embeds,
 )
 
 
@@ -285,6 +286,10 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
             input_ids, attention_mask=input_mask
         )
 
+        # Allow external soft embedding override
+        if "inputs_embeds_override" in kwargs:
+            input_embeds = kwargs["inputs_embeds_override"]
+
         # outputs["logits"]:[B, L, V=8229], outputs["last_hidden_state"]:[B, L, d_model]
         outputs = self.net(
             input_ids=input_ids,
@@ -292,8 +297,6 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
             attention_mask=attention_bias,
             type_ids=type_ids,
         )
-
-        # import ipdb; ipdb.set_trace()
 
         return outputs
 
@@ -531,6 +534,9 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
         need_attn_weights=False,
         partial_masks=None,
         sampling_strategy="annealing@2.2:1.0",
+        feedforward_mode="discrete",
+        mask_emb_mode="add",
+        linear_kwargs=None,
     ):
         output_tokens = prev_decoder_out["output_tokens"].clone()
         output_scores = prev_decoder_out["output_scores"].clone()
@@ -541,7 +547,62 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
         output_masks = self.get_non_special_symbol_mask(
             output_tokens, partial_masks=partial_masks
         )
-        net_out = self.forward(input_ids=output_tokens)
+
+        # Compute soft embeddings if feedforward_mode is not discrete
+        forward_kwargs = {}
+        prev_log_probs = prev_decoder_out.get("prev_log_probs")
+        if not feedforward_mode.startswith("discrete") and prev_log_probs is not None:
+            input_mask = output_tokens.ne(self.pad_id)
+            base_embeds = self.net.esm.embeddings(
+                output_tokens, attention_mask=input_mask
+            )
+            W = self.net.esm.embeddings.word_embeddings.weight  # [V, D]
+            V = W.shape[0]
+            special_set = set(self.special_token_list)
+
+            # Build per-modality valid vocab masks
+            type_ids = self.get_modality_type(output_tokens)
+            aa_masked = output_tokens.eq(self.aa_mask_id)
+            struct_masked = output_tokens.eq(self.struct_mask_id)
+
+            valid_aa = torch.zeros(V, dtype=torch.bool, device=W.device)
+            valid_aa[:33] = True
+            valid_struct = torch.zeros(V, dtype=torch.bool, device=W.device)
+            valid_struct[33:] = True
+            for sp in special_set:
+                if sp < V:
+                    valid_aa[sp] = False
+                    valid_struct[sp] = False
+
+            # Apply soft embedding per modality separately
+            soft_embeds = base_embeds.clone()
+            if aa_masked.any():
+                soft_embeds = compute_soft_embeds(
+                    input_embeds=soft_embeds,
+                    log_probs=prev_log_probs,
+                    word_embed_weight=W.detach(),
+                    masked_positions=aa_masked,
+                    mask_emb_mode=mask_emb_mode,
+                    feedforward_mode=feedforward_mode,
+                    step=step,
+                    max_step=max_step,
+                    valid_vocab_mask=valid_aa,
+                )
+            if struct_masked.any():
+                soft_embeds = compute_soft_embeds(
+                    input_embeds=soft_embeds,
+                    log_probs=prev_log_probs,
+                    word_embed_weight=W.detach(),
+                    masked_positions=struct_masked,
+                    mask_emb_mode=mask_emb_mode,
+                    feedforward_mode=feedforward_mode,
+                    step=step,
+                    max_step=max_step,
+                    valid_vocab_mask=valid_struct,
+                )
+            forward_kwargs["inputs_embeds_override"] = soft_embeds
+
+        net_out = self.forward(input_ids=output_tokens, **forward_kwargs)
 
         logits = net_out["logits"].log_softmax(dim=-1)
         attentions = net_out["attentions"] if need_attn_weights else None
@@ -858,6 +919,8 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
         sampling_strategy="annealing@2.0:0.1",
         remasking_strategy="uncond",  # [uncond, cond, no_remask]
         decoding_strategy=None,  # e.g. "dinfer_threshold@0.8", "klass@0.01:0.9:2:1", etc.
+        feedforward_mode="discrete",  # [discrete, linear, entropy]
+        mask_emb_mode="add",  # [add, replace]
     ):
         self.eval()
         max_iter = max_iter
@@ -868,6 +931,11 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
             strategy_name = "reparam"
         else:
             strategy_name = parse_strategy_name(decoding_strategy)
+
+        # LRD requires entropy-based soft embeddings for both phases
+        if strategy_name == "lrd":
+            feedforward_mode = "entropy"
+            mask_emb_mode = "replace"
 
         # 0) encoding
         encoder_out = self.forward_encoder(input_tokens)
@@ -917,8 +985,14 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
                 gamma=strategy_kwargs.get("gamma", 0.2),
             )
         elif strategy_name == "lrd":
-            strategy_state["lrd_aa"] = LRDState()
-            strategy_state["lrd_struct"] = LRDState()
+            tau_refine = strategy_kwargs.get("tau_refine", 0.1)
+            T_refine = strategy_kwargs.get("T_refine", 20)
+            strategy_state["lrd_aa"] = LRDState(
+                tau_refine=tau_refine, T_refine=T_refine,
+            )
+            strategy_state["lrd_struct"] = LRDState(
+                tau_refine=tau_refine, T_refine=T_refine,
+            )
 
         for step in tqdm(range(max_iter), desc="Decoding"):
             # Early stopping: if nothing is masked, stop
@@ -932,6 +1006,8 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
                     prev_decoder_out=prev_decoder_out,
                     partial_masks=partial_masks,
                     sampling_strategy=sampling_strategy,
+                    feedforward_mode=feedforward_mode,
+                    mask_emb_mode=mask_emb_mode,
                 )
 
             output_tokens = decoder_out["output_tokens"]
@@ -1002,6 +1078,7 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
                 output_scores=output_scores,
                 step=step + 1,
                 history=decoder_out["history"],
+                prev_log_probs=decoder_out.get("logits"),
             )
 
         decoder_out = prev_decoder_out
