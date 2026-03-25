@@ -648,7 +648,7 @@ class LRDState:
             torch.zeros_like(cur_p),
         ).sum(dim=-1).clamp(min=0.0)  # [B, L]
 
-        kl_masked = kl_per_pos * masked_positions.float()
+        kl_masked = kl_per_pos.masked_fill(~masked_positions, 0.0)
         n_masked = masked_positions.float().sum(dim=-1).clamp(min=1.0)
         return kl_masked.sum(dim=-1) / n_masked  # [B]
 
@@ -770,7 +770,12 @@ def decode_lrd(
     else:
         valid_lp = cur_log_probs
     valid_p = valid_lp.exp()
-    entropy = -(valid_p * valid_lp).sum(dim=-1)  # [B, L]
+    entropy = torch.where(
+        valid_p > 0,
+        -valid_p * valid_lp,
+        torch.zeros_like(valid_p),
+    ).sum(dim=-1)  # [B, L]
+    # -(valid_p * valid_lp).sum(dim=-1)  # [B, L]
 
     # Set entropy to +inf for non-selectable positions
     entropy = entropy.masked_fill(~active_masked, float('inf'))
@@ -908,7 +913,7 @@ def compute_soft_embeds(
     elif mode_name == "entropy":
         # LRD style: alpha_i = rf * (1 - H_norm_i)
         rf = mode_kwargs.get("rf", 0.2)
-        entropy = -(probs * lp).sum(dim=-1)  # [B, L]
+        entropy = torch.where(probs > 0, -(probs * lp), torch.zeros_like(probs)).sum(dim=-1)  # [B, L]
         V_size = probs.shape[-1]
         H_norm = entropy / math.log(V_size) if V_size > 1 else entropy
         H_norm = H_norm.clamp(0.0, 1.0)
@@ -1133,11 +1138,12 @@ def parse_strategy_kwargs(decoding_strategy):
 # # LRD (Latent Refinement Decoding)
 # # Format: lrd@tau_decode:k:tau_refine:T_refine
 # python generate_dplm2.py \
-    # --model_name airkingbd/dplm2_650m \
-    # --task inverse_folding \
-    # --input_fasta_path data-bin/cameo2022/struct.fasta \
-    # --max_iter 100 \
-    # --unmasking_strategy deterministic \
-    # --sampling_strategy argmax \
-    # --decoding_strategy "lrd@0.1:1:0.1:20" \
-    # --saveto generation-results/decoding_test/lrd
+#     --model_name airkingbd/dplm2_650m \
+#     --task inverse_folding \
+#     --input_fasta_path data-bin/cameo2022/struct.fasta \
+#     --max_iter 100 \
+#     --unmasking_strategy deterministic \
+#     --sampling_strategy argmax \
+#     --decoding_strategy "lrd@0.1:1:0.1:20" \
+#     --saveto generation-results/decoding_test/lrd
+                                                                                                                                                                                                                                                                        

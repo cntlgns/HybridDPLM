@@ -282,9 +282,13 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
             )
 
         # [B, L, d_model]
-        input_embeds = self.net.esm.embeddings(
-            input_ids, attention_mask=input_mask
-        )
+        # NOTE: disabled to avoid double embedding (position emb added twice).
+        # Let self.net compute embeddings internally (single pass).
+        # input_embeds = self.net.esm.embeddings(
+        #     input_ids, attention_mask=input_mask
+        # )
+        input_embeds = None
+        # import ipdb; ipdb.set_trace()
 
         # Allow external soft embedding override
         if "inputs_embeds_override" in kwargs:
@@ -297,6 +301,20 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
             attention_mask=attention_bias,
             type_ids=type_ids,
         )
+        # ipdb> torch.all(self.net(
+        #     input_ids=input_ids,
+        #     inputs_embeds=input_embeds,
+        #     attention_mask=attention_bias,
+        #     type_ids=type_ids,
+        # )["logits"] == self.net(
+        #     input_ids=input_ids,
+        #     inputs_embeds=kwargs["inputs_embeds_override"],
+        #     attention_mask=attention_bias,
+        #     type_ids=type_ids,
+        # )["logits"])
+        # True
+        # ipdb> torch.all(input_embeds==kwargs["inputs_embeds_override"])
+        # False
 
         return outputs
 
@@ -557,6 +575,8 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
                 output_tokens, attention_mask=input_mask
             )
             W = self.net.esm.embeddings.word_embeddings.weight  # [V, D]
+            W[self.aa_mask_id] = torch.zeros_like(W[self.aa_mask_id])
+            W[self.struct_mask_id] = torch.zeros_like(W[self.struct_mask_id])
             V = W.shape[0]
             special_set = set(self.special_token_list)
 
@@ -926,6 +946,10 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
         max_iter = max_iter
         temperature = temperature
 
+        if not feedforward_mode.startswith("discrete"):
+            self.net.esm.embeddings.token_dropout = False
+
+
         # Determine which decoding path to use
         if decoding_strategy is None:
             strategy_name = "reparam"
@@ -933,9 +957,9 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
             strategy_name = parse_strategy_name(decoding_strategy)
 
         # LRD requires entropy-based soft embeddings for both phases
-        if strategy_name == "lrd":
-            feedforward_mode = "entropy"
-            mask_emb_mode = "replace"
+        # if strategy_name == "lrd":
+        #     feedforward_mode = "entropy"
+        #     mask_emb_mode = "replace"
 
         # 0) encoding
         encoder_out = self.forward_encoder(input_tokens)

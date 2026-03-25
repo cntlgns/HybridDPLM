@@ -1,9 +1,11 @@
 #!/bin/bash
 # Usage: bash run_dplm2_if_ffdiff.sh <dataset> <model_name> <strategy_name> <hyperparam_tag> <decoding_strategy_string> <feedforward_mode> <mask_emb_mode>
 # Example: bash run_dplm2_if_ffdiff.sh cameo2022 dplm2_650m dinfer_threshold_linear t0.8_embadd "dinfer_threshold@0.8" linear add
+# Example (default strategy): bash run_dplm2_if_ffdiff.sh cameo2022 dplm2_650m default_discrete default none discrete add
 #
 # Fixed settings: deterministic unmasking, argmax sampling, no_remask remasking, max_iter=500
 # Output path: generation-results/ffdiff/{dataset}/{model_name}/{strategy_name}/{hyperparam_tag}/inverse_folding
+# Note: pass "none" for <decoding_strategy_string> to use the default linear-ratio decoding (no --decoding_strategy flag)
 
 DATASET=$1
 MODEL_NAME=$2
@@ -14,7 +16,7 @@ FEEDFORWARD_MODE=$6
 MASK_EMB_MODE=$7
 
 PROJECT_DIR=/data_fast/home/sihun/diffprotein/dplm
-EXP_NAME=ffdiff
+EXP_NAME=ffdiff_100_iter
 OUTPUT_DIR=${PROJECT_DIR}/generation-results/${EXP_NAME}/${DATASET}/${MODEL_NAME}/${STRATEGY_NAME}/${HYPERPARAM_TAG}
 INPUT_FASTA=${PROJECT_DIR}/data-bin/${DATASET}/struct.fasta
 EVAL_DIR=${OUTPUT_DIR}/inverse_folding
@@ -38,16 +40,22 @@ if [[ "${MODEL_NAME}" == "dplm2_bit_650m" ]]; then
     BIT_MODEL_FLAG="--bit_model"
 fi
 
+# Conditionally pass --decoding_strategy; "none" means use the default linear-ratio decoding
+DECODING_ARGS=()
+if [[ "${DECODING_STRATEGY}" != "none" ]]; then
+    DECODING_ARGS=(--decoding_strategy "${DECODING_STRATEGY}")
+fi
+
 ${PYTHON_BIN} generate_dplm2.py \
     --model_name airkingbd/${MODEL_NAME} \
     --task inverse_folding \
     ${BIT_MODEL_FLAG} \
     --input_fasta_path ${INPUT_FASTA} \
-    --max_iter 500 \
+    --max_iter 100 \
     --unmasking_strategy deterministic \
     --sampling_strategy argmax \
     --remasking_strategy no_remask \
-    --decoding_strategy "${DECODING_STRATEGY}" \
+    "${DECODING_ARGS[@]}" \
     --feedforward_mode ${FEEDFORWARD_MODE} \
     --mask_emb_mode ${MASK_EMB_MODE} \
     --saveto ${OUTPUT_DIR} && \
