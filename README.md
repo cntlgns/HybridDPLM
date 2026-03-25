@@ -494,6 +494,67 @@ python generate_dplm2.py \
 input_fasta_dir=${output_dir}/inverse_folding
 python src/byprot/utils/protein/evaluator_dplm2.py -cn inverse_folding inference.input_fasta_dir=${input_fasta_dir}
 ```
+
+<!-- omit in toc -->
+#### Advanced: Decoding Strategy, Feedforward Mode & Sampling Strategy
+
+You can specify `--decoding_strategy` and `--feedforward_mode` to control the decoding behavior. Below is a full example with all options:
+
+```bash
+python generate_dplm2.py \
+    --model_name airkingbd/${model_name} \
+    --task inverse_folding \
+    --input_fasta_path data-bin/cameo2022/struct.fasta \
+    --max_iter 100 \
+    --unmasking_strategy deterministic \
+    --sampling_strategy "annealing@2.0:0.1" \
+    --decoding_strategy "dinfer_hierarchical@0.92:0.62" \
+    --feedforward_mode "entropy@0.2" \
+    --saveto ${output_dir}
+```
+
+**Decoding Strategy** (`--decoding_strategy`): controls how masked positions are selected for unmasking at each step. Format is `strategy_name@param1:param2:...`.
+
+```bash
+# dinfer_threshold: unmask positions above a confidence threshold (default: 0.8)
+--decoding_strategy "dinfer_threshold@0.8"
+
+# dinfer_hierarchical: two-tier thresholding with segment-aware filtering
+#   upper_threshold (default: 0.92), lower_threshold (default: 0.62)
+--decoding_strategy "dinfer_hierarchical@0.92:0.62"
+
+# dinfer_credit: credit-based unmasking with EMA and top-1 boost
+#   threshold (0.8), beta (0.8), gamma (0.2), alpha (0.7)
+--decoding_strategy "dinfer_credit@0.8:0.8:0.2:0.7"
+
+# klass (KL-Adaptive Stability Sampling): unmask when KL stabilizes
+#   epsilon_kl (0.01), tau (0.9), n (2), fallback_count (1)
+--decoding_strategy "klass@0.01:0.9:2:1"
+
+# punt (Parallel Unmasking with Non-influence Tests): independence-based parallel unmasking
+#   epsilon (0.04)
+--decoding_strategy "punt@0.04"
+
+# lrd (Latent Refinement Decoding): two-phase refine-then-decode
+#   tau_decode (0.1), k (1), tau_refine (0.1), T_refine (20)
+--decoding_strategy "lrd@0.1:1:0.1:20"
+```
+
+**Feedforward Mode** (`--feedforward_mode`): controls soft embedding mixing between mask and predicted token embeddings during diffusion.
+
+```bash
+# discrete: no soft mixing (default, standard hard masking)
+--feedforward_mode "discrete"
+
+# linear: alpha increases linearly per step (dInfer IterSmooth style)
+#   init (0.1), growth (0.001), preset (0.3)
+--feedforward_mode "linear@0.1:0.001:0.3"
+
+# entropy: alpha = rf * (1 - normalized_entropy) per position (LRD style)
+#   rf (0.2)
+--feedforward_mode "entropy@0.2"
+```
+
 For any customized input structure, user can first tokenize the structure with structure tokenizer and save it to a FASTA file using the following script:
 ```bash
 # Tokenize

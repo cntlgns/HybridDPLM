@@ -254,6 +254,8 @@ def unconditional_generate(args):
                     sampling_strategy=args.sampling_strategy,
                     remasking_strategy=args.remasking_strategy,
                     decoding_strategy=args.decoding_strategy,
+                    feedforward_mode=args.feedforward_mode,
+                    mask_emb_mode=args.mask_emb_mode,
                 )
                 if args.task == "backbone_generation":
                     outputs["output_tokens"] = torch.cat(
@@ -361,6 +363,8 @@ def conditional_generate_from_fasta(args):
                 partial_masks=batch["partial_mask"],
                 remasking_strategy=args.remasking_strategy,
                 decoding_strategy=args.decoding_strategy,
+                feedforward_mode=args.feedforward_mode,
+                mask_emb_mode=args.mask_emb_mode,
             )
 
         save_results(
@@ -565,6 +569,29 @@ def main():
             "New decoding strategy. If None, uses legacy reparam decoding. "
             "Options: dinfer_threshold@0.8, klass@0.01:0.9:2:1, "
             "dinfer_credit@0.8:0.8:0.2:0.7, dinfer_hierarchical@0.92:0.62, punt@0.04"
+        ),
+    )
+    parser.add_argument(
+        "--feedforward_mode",
+        type=str,
+        default="discrete",
+        help=(
+            "Soft embedding feedforward mode. "
+            "discrete: no soft embedding (default). "
+            "linear: dInfer IterSmooth style (default params). "
+            "linear@init:growth:preset: linear with custom params. "
+            "entropy: LRD style."
+        ),
+    )
+    parser.add_argument(
+        "--mask_emb_mode",
+        type=str,
+        default="add",
+        choices=["add", "replace"],
+        help=(
+            "How to mix mask embedding with predicted token embedding. "
+            "add: e_mask + alpha*E[e_v] (dInfer). "
+            "replace: (1-alpha)*e_mask + alpha*E[e_v] (LRD)."
         ),
     )
 
