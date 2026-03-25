@@ -21,6 +21,13 @@ from byprot.models.utils import *
 from byprot.models.dplm2.decoding_strategies import (
     parse_strategy_name,
     parse_strategy_kwargs,
+    parse_feedforward_mode,
+    decode_dinfer_threshold,
+    decode_dinfer_hierarchical,
+    decode_dinfer_credit,
+    decode_klass,
+    decode_punt,
+    decode_lrd,
     KLASSState,
     CreditState,
     LRDState,
@@ -120,28 +127,32 @@ class DPLM2Bit(DPLM2):
                 [struct_attention_bias, aa_attention_bias], dim=-2
             )
 
-        ######## construct the input embedding
-        # [B, L, d_model]
-        input_struct_ids, input_aatype_ids = input_ids.chunk(2, dim=1)
-        input_struct_mask, input_aatype_mask = input_mask.chunk(2, dim=1)
-        input_aatype_embeds = self.net.esm.embeddings(
-            input_aatype_ids, attention_mask=input_aatype_mask
-        )
-        input_struct_embeds = torch.zeros_like(input_aatype_embeds)
-        quant = self.struct_tokenizer.quantize.get_codebook_entry(
-            input_struct_ids - self.struct_vocab_offset
-        )
+        # Allow external soft embedding override (for feedforward diffusion)
+        if "inputs_embeds_override" in kwargs:
+            input_embeds = kwargs["inputs_embeds_override"]
+        else:
+            ######## construct the input embedding
+            # [B, L, d_model]
+            input_struct_ids, input_aatype_ids = input_ids.chunk(2, dim=1)
+            input_struct_mask, input_aatype_mask = input_mask.chunk(2, dim=1)
+            input_aatype_embeds = self.net.esm.embeddings(
+                input_aatype_ids, attention_mask=input_aatype_mask
+            )
+            input_struct_embeds = torch.zeros_like(input_aatype_embeds)
+            quant = self.struct_tokenizer.quantize.get_codebook_entry(
+                input_struct_ids - self.struct_vocab_offset
+            )
 
-        input_struct_embeds = self.net.quant2emb(quant).float()
-        input_struct_embeds[:, 0] = self.net.struct_bos_emb
-        eos_position = input_struct_ids == self.struct_eos_id
-        input_struct_embeds[eos_position] = self.net.struct_eos_emb
-        mask_position = input_struct_ids == self.struct_mask_id
-        input_struct_embeds[mask_position] = self.net.struct_mask_emb
+            input_struct_embeds = self.net.quant2emb(quant).float()
+            input_struct_embeds[:, 0] = self.net.struct_bos_emb
+            eos_position = input_struct_ids == self.struct_eos_id
+            input_struct_embeds[eos_position] = self.net.struct_eos_emb
+            mask_position = input_struct_ids == self.struct_mask_id
+            input_struct_embeds[mask_position] = self.net.struct_mask_emb
 
-        input_embeds = torch.concat(
-            [input_struct_embeds, input_aatype_embeds], dim=1
-        )
+            input_embeds = torch.concat(
+                [input_struct_embeds, input_aatype_embeds], dim=1
+            )
 
         outputs = self.net(
             input_ids=input_ids,
@@ -264,6 +275,8 @@ class DPLM2Bit(DPLM2):
         need_attn_weights=False,
         partial_masks=None,
         sampling_strategy="annealing@1.1:0.1",
+        feedforward_mode="discrete",
+        mask_emb_mode="add",
     ):
         output_tokens = prev_decoder_out["output_tokens"].clone()
         output_scores = prev_decoder_out["output_scores"].clone()
@@ -275,7 +288,25 @@ class DPLM2Bit(DPLM2):
             output_tokens, partial_masks=partial_masks
         )
 
-        net_out = self.forward(input_ids=output_tokens)
+        # Compute soft embeddings if feedforward_mode is not discrete
+        forward_kwargs = {}
+        prev_aatype_logits = prev_decoder_out.get("prev_aatype_logits")
+        prev_struct_logits = prev_decoder_out.get("prev_struct_logits")
+        has_prev_logits = prev_aatype_logits is not None or prev_struct_logits is not None
+        if not feedforward_mode.startswith("discrete") and has_prev_logits:
+            soft_embeds = self._compute_bit_soft_embeds(
+                output_tokens=output_tokens,
+                prev_aatype_logits=prev_aatype_logits,
+                prev_struct_logits=prev_struct_logits,
+                feedforward_mode=feedforward_mode,
+                mask_emb_mode=mask_emb_mode,
+                step=step,
+                max_step=max_step,
+            )
+            if soft_embeds is not None:
+                forward_kwargs["inputs_embeds_override"] = soft_embeds
+
+        net_out = self.forward(input_ids=output_tokens, **forward_kwargs)
 
         aatype_logits = net_out["aatype_logits"]
         struct_logits = net_out["struct_logits"]
@@ -331,6 +362,8 @@ class DPLM2Bit(DPLM2):
             history=history,
             all_hidden_states=net_out["all_hidden_states"],
             logits=combined_logits,
+            aatype_logits=aatype_logits,  # [B, L, V_aa] for soft embeds
+            struct_logits=struct_logits,  # [B, L, C, 2] for soft embeds
         )
 
     def sample_from_logits(
@@ -355,6 +388,372 @@ class DPLM2Bit(DPLM2):
         _scores = torch.concat([_struct_scores, _aatype_scores], dim=1)
         return _tokens, _scores
 
+    def _compute_bit_soft_embeds(
+        self,
+        output_tokens,
+        prev_aatype_logits=None,
+        prev_struct_logits=None,
+        feedforward_mode="linear",
+        mask_emb_mode="add",
+        step=0,
+        max_step=1,
+    ):
+        """Compute soft embeddings for the bit model.
+
+        For AA tokens: uses standard word embedding expected value (same as parent).
+        For struct tokens: uses per-bit probabilities to compute expected binary
+        codes, then passes through quant2emb.
+
+        Args:
+            output_tokens: [B, L] current tokens (L = struct_half + aa_half)
+            prev_aatype_logits: [B, half_L, V_aa] from previous forward_decoder
+            prev_struct_logits: [B, half_L, C, 2] from previous forward_decoder
+            feedforward_mode: "linear" or "entropy"
+            mask_emb_mode: "add" or "replace"
+            step: current decoding step
+            max_step: total decoding steps
+
+        Returns:
+            soft_embeds: [B, L, D] embeddings with soft mixing at masked positions
+        """
+        mode_name, mode_kwargs = parse_feedforward_mode(feedforward_mode)
+        if mode_name == "discrete":
+            return None  # no soft embeddings needed
+
+        input_mask = output_tokens.ne(self.pad_id)
+        input_struct_ids, input_aatype_ids = output_tokens.chunk(2, dim=1)
+        input_struct_mask, input_aatype_mask = input_mask.chunk(2, dim=1)
+
+        # Build base embeddings (same as forward())
+        input_aatype_embeds = self.net.esm.embeddings(
+            input_aatype_ids, attention_mask=input_aatype_mask
+        )
+        quant = self.struct_tokenizer.quantize.get_codebook_entry(
+            input_struct_ids - self.struct_vocab_offset
+        )
+        input_struct_embeds = self.net.quant2emb(quant).float()
+        input_struct_embeds[:, 0] = self.net.struct_bos_emb
+        eos_position = input_struct_ids == self.struct_eos_id
+        input_struct_embeds[eos_position] = self.net.struct_eos_emb
+        mask_position_struct = input_struct_ids == self.struct_mask_id
+        input_struct_embeds[mask_position_struct] = self.net.struct_mask_emb
+
+        base_embeds = torch.concat(
+            [input_struct_embeds, input_aatype_embeds], dim=1
+        )
+
+        B, L, D = base_embeds.shape
+        half_L = L // 2  # struct half length
+
+        # Identify masked positions per modality
+        aa_masked = input_aatype_ids.eq(self.aa_mask_id)  # [B, half_L]
+        struct_masked = mask_position_struct  # [B, half_L]
+
+        if not aa_masked.any() and not struct_masked.any():
+            return base_embeds
+
+        soft_embeds = base_embeds.clone()
+
+        # --- AA part: standard word embedding expected value ---
+        if aa_masked.any() and prev_aatype_logits is not None:
+            aa_log_probs = prev_aatype_logits.log_softmax(dim=-1)  # [B, half_L, V_aa]
+            aa_probs = aa_log_probs.exp()
+
+            W_aa = self.net.esm.embeddings.word_embeddings.weight[:aa_probs.shape[-1]].detach()  # [V_aa, D]
+
+            # Compute expected AA embedding for masked positions
+            expected_aa_emb = torch.zeros(B, half_L, D,
+                                          dtype=base_embeds.dtype,
+                                          device=base_embeds.device)
+            for b in range(B):
+                mask_b = aa_masked[b]
+                if mask_b.any():
+                    expected_aa_emb[b, mask_b] = (
+                        aa_probs[b, mask_b].to(W_aa.dtype) @ W_aa
+                    ).to(expected_aa_emb.dtype)
+
+            # Compute alpha for AA
+            alpha_aa = self._compute_alpha(
+                mode_name, mode_kwargs, aa_probs, aa_masked,
+                step, max_step, base_embeds.dtype, base_embeds.device, B, half_L
+            )
+            alpha_3d = alpha_aa.unsqueeze(-1)  # [B, half_L, 1]
+            mask_3d = aa_masked.unsqueeze(-1)
+
+            aa_embeds = soft_embeds[:, half_L:]  # AA is the second half
+            if mask_emb_mode == "add":
+                soft_aa = aa_embeds + alpha_3d * expected_aa_emb
+            else:  # replace
+                soft_aa = (1 - alpha_3d) * aa_embeds + alpha_3d * expected_aa_emb
+            soft_embeds[:, half_L:] = torch.where(mask_3d, soft_aa, aa_embeds)
+
+        # --- Struct part: per-bit soft codes through quant2emb ---
+        if struct_masked.any() and prev_struct_logits is not None:
+            # prev_struct_logits: [B, half_L, C, 2]
+            struct_probs = prev_struct_logits.softmax(dim=-1)  # [B, half_L, C, 2]
+            # Soft binary code: probability of bit=1
+            soft_bits = struct_probs[..., 1]  # [B, half_L, C]
+
+            # Compute expected struct embedding via quant2emb
+            expected_struct_emb = self.net.quant2emb(soft_bits).float()  # [B, half_L, D]
+
+            # For entropy-based alpha, compute entropy from per-bit distributions
+            if mode_name == "entropy":
+                # Per-bit entropy, averaged over codebook dims
+                bit_entropy = -(struct_probs * (struct_probs + 1e-10).log()).sum(dim=-1)  # [B, half_L, C]
+                avg_entropy = bit_entropy.mean(dim=-1)  # [B, half_L]
+                H_max = math.log(2)  # max entropy for binary
+                H_norm = (avg_entropy / H_max).clamp(0.0, 1.0)
+                rf = mode_kwargs.get("rf", 0.2)
+                alpha_struct = (rf * (1.0 - H_norm)).to(base_embeds.dtype)
+            else:
+                alpha_struct = self._compute_alpha(
+                    mode_name, mode_kwargs, None, struct_masked,
+                    step, max_step, base_embeds.dtype, base_embeds.device, B, half_L
+                )
+
+            alpha_3d = alpha_struct.unsqueeze(-1)  # [B, half_L, 1]
+            mask_3d = struct_masked.unsqueeze(-1)
+
+            struct_embeds = soft_embeds[:, :half_L]  # struct is the first half
+            if mask_emb_mode == "add":
+                soft_struct = struct_embeds + alpha_3d * expected_struct_emb
+            else:  # replace
+                soft_struct = (1 - alpha_3d) * struct_embeds + alpha_3d * expected_struct_emb
+            soft_embeds[:, :half_L] = torch.where(mask_3d, soft_struct, struct_embeds)
+
+        return soft_embeds
+
+    def _compute_alpha(self, mode_name, mode_kwargs, probs, masked_positions,
+                       step, max_step, dtype, device, B, L):
+        """Compute alpha mixing weight for soft embeddings."""
+        if mode_name == "linear":
+            alpha_init = mode_kwargs.get("init", 0.1)
+            alpha_growth = mode_kwargs.get("growth", 0.001)
+            alpha_preset = mode_kwargs.get("preset", 0.3)
+            alpha = min(alpha_init + alpha_growth * step, alpha_preset)
+            return torch.full((B, L), alpha, dtype=dtype, device=device)
+        elif mode_name == "entropy" and probs is not None:
+            rf = mode_kwargs.get("rf", 0.2)
+            log_probs = (probs + 1e-10).log()
+            entropy = -(probs * log_probs).sum(dim=-1)  # [B, L]
+            V_size = probs.shape[-1]
+            H_norm = (entropy / math.log(V_size)).clamp(0.0, 1.0) if V_size > 1 else entropy
+            return (rf * (1.0 - H_norm)).to(dtype)
+        else:
+            # Fallback: linear default
+            alpha = min(0.1 + 0.001 * step, 0.3)
+            return torch.full((B, L), alpha, dtype=dtype, device=device)
+
+    def _apply_new_strategy(
+        self,
+        strategy_name,
+        strategy_kwargs,
+        strategy_state,
+        prev_tokens,
+        prev_scores,
+        cur_tokens,
+        cur_scores,
+        cur_log_probs,
+        xt_neq_x0,
+        type_ids,
+        non_special_sym_mask,
+        step,
+        cur_aatype_logits=None,
+        cur_struct_logits=None,
+        prev_aatype_logits=None,
+        prev_struct_logits=None,
+    ):
+        """Override for bit model: handle separate struct/AA logit spaces.
+
+        The bit model has fundamentally different logit structures per modality:
+        - AA: [B, L/2, V_aa] categorical logits
+        - Struct: [B, L/2, C, 2] per-bit binary logits
+
+        This override splits all tensors into per-modality halves, calls strategy
+        functions with consistently-shaped half-length tensors, then combines results.
+        """
+        output_tokens = prev_tokens
+        output_scores = prev_scores
+        new_xt_neq_x0 = xt_neq_x0.clone()
+
+        B, L = prev_tokens.shape
+        half_L = L // 2
+
+        for modality in ["struct", "aa"]:
+            if modality == "struct":
+                sl = slice(0, half_L)
+                mask_id = self.struct_mask_id
+                # Reshape struct logits: [B, half_L, C, 2] -> [B, half_L, C*2]
+                if cur_struct_logits is not None:
+                    mod_cur_lp = cur_struct_logits.reshape(B, half_L, -1).log_softmax(dim=-1)
+                else:
+                    mod_cur_lp = None
+                if prev_struct_logits is not None:
+                    mod_prev_lp = prev_struct_logits.reshape(B, half_L, -1).log_softmax(dim=-1)
+                else:
+                    mod_prev_lp = None
+            else:
+                sl = slice(half_L, L)
+                mask_id = self.aa_mask_id
+                if cur_aatype_logits is not None:
+                    mod_cur_lp = cur_aatype_logits.log_softmax(dim=-1)
+                else:
+                    mod_cur_lp = None
+                if prev_aatype_logits is not None:
+                    mod_prev_lp = prev_aatype_logits.log_softmax(dim=-1)
+                else:
+                    mod_prev_lp = None
+
+            # Extract half-length tensors for this modality
+            mod_out_tokens = output_tokens[:, sl].clone()
+            mod_out_scores = output_scores[:, sl].clone()
+            mod_cur_tokens = cur_tokens[:, sl]
+            mod_cur_scores = cur_scores[:, sl]
+            mod_xt = xt_neq_x0[:, sl]
+            mod_nsm = non_special_sym_mask[:, sl]
+
+            if not (mod_xt & mod_nsm).any():
+                continue
+
+            # No valid_vocab_mask needed: each modality already has its own logit space
+            if strategy_name == "dinfer_threshold":
+                new_mod_xt, mod_out_tokens, mod_out_scores = decode_dinfer_threshold(
+                    output_tokens=mod_out_tokens,
+                    output_scores=mod_out_scores,
+                    cur_tokens=mod_cur_tokens,
+                    cur_scores=mod_cur_scores,
+                    xt_neq_x0=mod_xt,
+                    non_special_sym_mask=mod_nsm,
+                    mask_id=mask_id,
+                    **strategy_kwargs,
+                )
+
+            elif strategy_name == "klass":
+                klass_key = f"klass_{modality}"
+                klass_st = strategy_state[klass_key]
+                prev_lp_key = f"prev_log_probs_{modality}"
+                mod_prev_lp_for_klass = strategy_state.get(prev_lp_key)
+
+                kw = {k: v for k, v in strategy_kwargs.items() if k != "n"}
+                new_mod_xt, mod_out_tokens, mod_out_scores = decode_klass(
+                    output_tokens=mod_out_tokens,
+                    output_scores=mod_out_scores,
+                    cur_tokens=mod_cur_tokens,
+                    cur_scores=mod_cur_scores,
+                    xt_neq_x0=mod_xt,
+                    non_special_sym_mask=mod_nsm,
+                    mask_id=mask_id,
+                    klass_state=klass_st,
+                    cur_log_probs=mod_cur_lp,
+                    prev_log_probs=mod_prev_lp_for_klass,
+                    valid_vocab_mask=None,
+                    **kw,
+                )
+
+            elif strategy_name == "dinfer_credit":
+                credit_key = f"credit_{modality}"
+                credit_st = strategy_state[credit_key]
+                kw = {k: v for k, v in strategy_kwargs.items()
+                      if k not in ("beta", "gamma")}
+                new_mod_xt, mod_out_tokens, mod_out_scores = decode_dinfer_credit(
+                    output_tokens=mod_out_tokens,
+                    output_scores=mod_out_scores,
+                    cur_tokens=mod_cur_tokens,
+                    cur_scores=mod_cur_scores,
+                    xt_neq_x0=mod_xt,
+                    non_special_sym_mask=mod_nsm,
+                    mask_id=mask_id,
+                    credit_state=credit_st,
+                    cur_log_probs=mod_cur_lp,
+                    valid_vocab_mask=None,
+                    **kw,
+                )
+
+            elif strategy_name == "dinfer_hierarchical":
+                new_mod_xt, mod_out_tokens, mod_out_scores = decode_dinfer_hierarchical(
+                    output_tokens=mod_out_tokens,
+                    output_scores=mod_out_scores,
+                    cur_tokens=mod_cur_tokens,
+                    cur_scores=mod_cur_scores,
+                    xt_neq_x0=mod_xt,
+                    non_special_sym_mask=mod_nsm,
+                    mask_id=mask_id,
+                    **strategy_kwargs,
+                )
+
+            elif strategy_name == "punt":
+                _sl = sl  # capture for closure
+                # Capture the other modality's tokens for reconstructing full input
+                if modality == "struct":
+                    _other_tokens = cur_tokens[:, half_L:]  # AA half
+                else:
+                    _other_tokens = cur_tokens[:, :half_L]  # struct half
+
+                def forward_fn(half_input_ids, _self=self, _sl=_sl,
+                               _other=_other_tokens, _mod=modality):
+                    """Reconstruct full input, forward, extract half logits."""
+                    if _mod == "struct":
+                        full_input = torch.cat([half_input_ids, _other[:half_input_ids.shape[0]]], dim=1)
+                    else:
+                        full_input = torch.cat([_other[:half_input_ids.shape[0]], half_input_ids], dim=1)
+                    net_out = _self.forward(input_ids=full_input)
+                    if _mod == "struct":
+                        logits = net_out["struct_logits"]
+                        bsz, seq_len = logits.shape[:2]
+                        logits = logits.reshape(bsz, seq_len, -1).log_softmax(dim=-1)
+                    else:
+                        logits = net_out["aatype_logits"]
+                        logits[:, :, :4] = -math.inf
+                        logits[:, :, 24:] = -math.inf
+                        logits = top_k_top_p_filtering(logits, top_p=0.95)
+                        logits = logits.log_softmax(dim=-1)
+                    return {"logits": logits}
+
+                new_mod_xt, mod_out_tokens, mod_out_scores = decode_punt(
+                    output_tokens=mod_out_tokens,
+                    output_scores=mod_out_scores,
+                    cur_tokens=mod_cur_tokens,
+                    cur_scores=mod_cur_scores,
+                    xt_neq_x0=mod_xt,
+                    non_special_sym_mask=mod_nsm,
+                    mask_id=mask_id,
+                    baseline_log_probs=mod_cur_lp,
+                    forward_fn=forward_fn,
+                    valid_vocab_mask=None,
+                    **strategy_kwargs,
+                )
+
+            elif strategy_name == "lrd":
+                lrd_key = f"lrd_{modality}"
+                lrd_st = strategy_state[lrd_key]
+                new_mod_xt, mod_out_tokens, mod_out_scores = decode_lrd(
+                    output_tokens=mod_out_tokens,
+                    output_scores=mod_out_scores,
+                    cur_tokens=mod_cur_tokens,
+                    cur_scores=mod_cur_scores,
+                    xt_neq_x0=mod_xt,
+                    non_special_sym_mask=mod_nsm,
+                    mask_id=mask_id,
+                    cur_log_probs=mod_cur_lp,
+                    lrd_state=lrd_st,
+                    valid_vocab_mask=None,
+                    **strategy_kwargs,
+                )
+            else:
+                raise ValueError(f"Unknown decoding strategy: {strategy_name}")
+
+            # Write back half-length results into full-length tensors
+            output_tokens[:, sl] = mod_out_tokens
+            output_scores[:, sl] = mod_out_scores
+            new_xt_neq_x0[:, sl] = new_mod_xt
+
+            # Store per-modality prev_log_probs for KLASS
+            if strategy_name == "klass" and mod_cur_lp is not None:
+                strategy_state[f"prev_log_probs_{modality}"] = mod_cur_lp.clone()
+
+        return new_xt_neq_x0, output_tokens, output_scores
+
     def generate(
         self,
         input_tokens,
@@ -365,10 +764,15 @@ class DPLM2Bit(DPLM2):
         sampling_strategy="annealing@1.1:0.1",
         remasking_strategy="uncond",  # [uncond, cond, no_remask]
         decoding_strategy=None,  # e.g. "dinfer_threshold@0.8", "klass@0.01:0.9:2:1", etc.
+        feedforward_mode="discrete",  # [discrete, linear, entropy]
+        mask_emb_mode="add",  # [add, replace]
     ):
         self.eval()
         max_iter = max_iter
         temperature = temperature
+
+        if not feedforward_mode.startswith("discrete"):
+            self.net.esm.embeddings.token_dropout = False
 
         # Determine which decoding path to use
         if decoding_strategy is None:
@@ -406,26 +810,37 @@ class DPLM2Bit(DPLM2):
         strategy_state = {}
         B, L = initial_output_tokens.shape
 
+        half_L = L // 2
+
         if strategy_name == "klass":
             n = strategy_kwargs.get("n", 2)
             strategy_state["klass_aa"] = KLASSState(n=n)
             strategy_state["klass_struct"] = KLASSState(n=n)
-            strategy_state["prev_log_probs"] = None
         elif strategy_name == "dinfer_credit":
-            V = getattr(self.cfg, "vocab_size", None) or getattr(self.cfg.tokenizer, "vocab_size", 8229)
+            # AA vocab size (number of AA tokens)
+            V_aa = 33
+            # Struct vocab: C*2 (binary logits per codebook dim)
+            C = self.cfg.bit.codebook_embed_dim
+            V_struct = C * 2
             strategy_state["credit_aa"] = CreditState(
-                B, L, V, initial_output_tokens.device,
+                B, half_L, V_aa, initial_output_tokens.device,
                 beta=strategy_kwargs.get("beta", 0.8),
                 gamma=strategy_kwargs.get("gamma", 0.2),
             )
             strategy_state["credit_struct"] = CreditState(
-                B, L, V, initial_output_tokens.device,
+                B, half_L, V_struct, initial_output_tokens.device,
                 beta=strategy_kwargs.get("beta", 0.8),
                 gamma=strategy_kwargs.get("gamma", 0.2),
             )
         elif strategy_name == "lrd":
-            strategy_state["lrd_aa"] = LRDState()
-            strategy_state["lrd_struct"] = LRDState()
+            tau_refine = strategy_kwargs.get("tau_refine", 0.1)
+            T_refine = strategy_kwargs.get("T_refine", 20)
+            strategy_state["lrd_aa"] = LRDState(
+                tau_refine=tau_refine, T_refine=T_refine,
+            )
+            strategy_state["lrd_struct"] = LRDState(
+                tau_refine=tau_refine, T_refine=T_refine,
+            )
 
         for step in tqdm(range(max_iter), desc="Decoding"):
             # Early stopping: if nothing is masked, stop
@@ -439,6 +854,8 @@ class DPLM2Bit(DPLM2):
                     prev_decoder_out=prev_decoder_out,
                     partial_masks=partial_masks,
                     sampling_strategy=sampling_strategy,
+                    feedforward_mode=feedforward_mode,
+                    mask_emb_mode=mask_emb_mode,
                 )
 
             output_tokens = decoder_out["output_tokens"]
@@ -484,6 +901,10 @@ class DPLM2Bit(DPLM2):
                     type_ids=prev_decoder_out["type_ids"].clone(),
                     non_special_sym_mask=non_special_sym_mask,
                     step=step,
+                    cur_aatype_logits=decoder_out.get("aatype_logits"),
+                    cur_struct_logits=decoder_out.get("struct_logits"),
+                    prev_aatype_logits=prev_decoder_out.get("prev_aatype_logits"),
+                    prev_struct_logits=prev_decoder_out.get("prev_struct_logits"),
                 )
 
             # Final step: force-unmask remaining
@@ -508,6 +929,9 @@ class DPLM2Bit(DPLM2):
                 step=step + 1,
                 history=decoder_out["history"],
                 all_hidden_states=decoder_out["all_hidden_states"],
+                prev_log_probs=decoder_out.get("logits"),
+                prev_aatype_logits=decoder_out.get("aatype_logits"),
+                prev_struct_logits=decoder_out.get("struct_logits"),
             )
 
         decoder_out = prev_decoder_out
