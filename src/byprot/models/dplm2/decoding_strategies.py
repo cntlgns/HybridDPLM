@@ -440,30 +440,6 @@ def decode_dinfer_hierarchical(
     return new_xt_neq_x0, output_tokens, output_scores
 
 
-def _find_contiguous_spans(indices):
-    """Find contiguous spans in sorted index tensor.
-
-    Args:
-        indices: 1D sorted tensor of indices
-
-    Returns:
-        list of (start, end) tuples
-    """
-    if len(indices) == 0:
-        return []
-    spans = []
-    start = indices[0].item()
-    prev = start
-    for i in range(1, len(indices)):
-        cur = indices[i].item()
-        if cur != prev + 1:
-            spans.append((start, prev))
-            start = cur
-        prev = cur
-    spans.append((start, prev))
-    return spans
-
-
 # ---------------------------------------------------------------------------
 # Strategy 5: PUNT (Parallel Unmasking with Non-influence Tests)
 # ---------------------------------------------------------------------------
@@ -968,8 +944,6 @@ def _fallback_topk(confidence_masked, masked_positions, k):
 # ---------------------------------------------------------------------------
 # Dispatcher: parse decoding_strategy string and call appropriate function
 # ---------------------------------------------------------------------------
-
-STRATEGY_PREFIX = "dinfer_threshold"  # just for reference
 
 def parse_strategy_name(decoding_strategy):
     """Extract the strategy name from decoding_strategy string.
