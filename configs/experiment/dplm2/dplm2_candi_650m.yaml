@@ -1,0 +1,135 @@
+# @package _global_
+
+# DPLM2 + CANDI hybrid discrete-continuous diffusion finetuning
+#
+# This config finetunes DPLM2-650M with CANDI's hybrid noising:
+#   - Discrete masking (same as DPLM2) + Continuous Gaussian noise
+#   - Decouples discrete identity corruption from continuous rank degradation
+#
+# Usage:
+#   python train.py experiment=dplm2/dplm2_candi_650m
+#
+# To finetune from a pre-trained DPLM2 checkpoint instead of DPLM:
+#   1. Set training_stage to "finetune_from_dplm2_hf"
+#   2. Set net.pretrained_model_name_or_path to "airkingbd/dplm2_650m"
+#   3. Set net.pretrain to false (loading handled by CANDI class)
+
+defaults:
+  - /datamodule: tokenized_protein
+  - /callbacks: lm
+  - /trainer: ddp_bf16
+
+project: "DPLM2_CANDI_650m"
+name: "dplm2_candi_650m"
+
+datamodule:
+  data_dir: ${paths.data_dir}
+  csv_file: pdb_swissprot
+  vocab_file: airkingbd/dplm2_650m
+  struct_vocab_size: 8192
+  max_tokens: 4000
+  max_len: 512
+
+model:
+  _target_: dplm2_candi
+  num_diffusion_timesteps: 500
+  gradient_ckpt: false
+  # --- Training stage ---
+  # "train_from_dplm": start from DPLM (sequence-only), expand vocab (same as original DPLM2)
+  # "finetune_from_dplm2_hf": start from HuggingFace DPLM2 (struct tokens already trained)
+  training_stage: train_from_dplm
+  # --- Multi-task ratios ---
+  single_modality_ratio: 0.25
+  folding_loss_ratio: 0.25
+  inverse_folding_loss_ratio: 0.25
+  joint_loss_ratio: 0.25
+  independent_loss_ratio: 0.0
+  # --- CANDI-specific config ---
+  candi:
+    # "embedding": add noise in d-dim embedding space (memory efficient)
+    # "onehot": add noise in one-hot space then map through W (principled but heavier)
+    noise_space: embedding
+    # One-hot schedule: target rank degradation range
+    r_min: 0.01
+    r_max: 0.25
+    # Embedding VE-SDE schedule
+    sigma_min: 0.01
+    sigma_max: 2.0
+    # Corruption bias mixing: 0 = pure noisy, 1 = pure bias (like mask token)
+    lambda_bias: 0.5
+    # Add learned sigma embedding to model input
+    use_sigma_embed: true
+    # Loss weight: "candi" (ELBO 1/t) or "linear" (original DPLM2)
+    loss_weight: candi
+  # --- LoRA config ---
+  lora:
+    enable: true
+    lora_rank: 16
+    lora_dropout: 0.1
+    lora_target_module: (esm.encoder.layer.[0-9]*.attention.(self.query|self.key|self.value|output.dense).*|esm.encoder.layer.[0-9]*.(intermediate|output).dense.*)
+    modules_to_save: lm_head,esm.embeddings
+  # --- Network backbone ---
+  net:
+    arch_type: esm
+    name: airkingbd/dplm_650m
+    dropout: 0.1
+    pretrain: true
+    pretrained_model_name_or_path: airkingbd/dplm_650m
+  # --- Self-mixup (disabled for CANDI) ---
+  self_mixup:
+    enable: false
+    with_original_loss: false
+  tokenizer:
+    vocab_file: ${datamodule.vocab_file}
+    vocab_size: 33
+  struct_tokenizer:
+    exp_path: airkingbd/struct_tokenizer
+
+task:
+  _target_: lm/dplm2
+  learning:
+    watch_t1_t2_loss: false
+    cal_constant_loss: true
+    # Use CANDI loss weighting (passed to model.compute_loss)
+    weight: candi
+  criterion:
+    _target_: byprot.modules.cross_entropy.StructAARDMCrossEntropyLoss
+    label_smoothing: 0.0
+    ignore_index: 1
+  optimizer:
+    type: adamw
+    _partial_: true
+    lr: ${train.lr}
+    betas:
+      - 0.9
+      - 0.98
+    weight_decay: 0.01
+  lr_scheduler:
+    type: polynomial
+    warmup_steps: 2000
+    total_steps: ${trainer.max_steps}
+    lr: ${train.lr}
+    lr_end: 1e-5
+    warmup_init_lr: 1e-07
+    power: 1
+
+train:
+  seed: 42
+  lr: 1e-4
+  monitor: "val/loss"
+  mode: "min"
+  patience: 1000
+
+trainer:
+  min_epochs: 10
+  max_epochs: 10000
+  gradient_clip_val: 0.5
+  num_sanity_val_steps: 1
+  reload_dataloaders_every_n_epochs: 1
+  use_distributed_sampler: false
+  max_steps: 100_000
+  accumulate_grad_batches: 1
+  check_val_every_n_epoch: null
+  val_check_interval: 500
+  enable_progress_bar: true
+  num_nodes: 1
