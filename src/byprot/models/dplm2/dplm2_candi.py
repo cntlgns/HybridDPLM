@@ -169,10 +169,25 @@ class CANDIDiffusionProteinLanguageModel(
         return net
 
     def _get_word_embeddings(self) -> torch.Tensor:
-        """Get word embedding weight tensor, handling PEFT wrapping."""
+        """Get word embedding weight tensor, handling PEFT wrapping.
+
+        When LoRA's ``modules_to_save`` includes ``esm.embeddings``, PEFT
+        wraps the entire EsmEmbeddings in a ``ModulesToSaveWrapper``:
+
+            net.base_model.model.esm.embeddings  (ModulesToSaveWrapper)
+            ├── .original_module.word_embeddings.weight   ← frozen original
+            └── .modules_to_save["default"].word_embeddings.weight  ← trainable
+
+        We want the **trainable** copy used in the forward pass.
+        """
         try:
-            # PEFT-wrapped: PeftModel -> LoraModel -> original model
-            return self.net.base_model.model.esm.embeddings.word_embeddings.weight
+            emb = self.net.base_model.model.esm.embeddings
+            # PEFT ModulesToSaveWrapper: get the active trainable copy
+            if hasattr(emb, "modules_to_save"):
+                active = emb.modules_to_save[emb.active_adapter]
+                return active.word_embeddings.weight
+            # PEFT without modules_to_save on embeddings
+            return emb.word_embeddings.weight
         except AttributeError:
             # Non-PEFT: direct access
             return self.net.esm.embeddings.word_embeddings.weight
@@ -181,9 +196,10 @@ class CANDIDiffusionProteinLanguageModel(
         """Initialize corruption bias from average of mask token embeddings."""
         try:
             with torch.no_grad():
-                W = self._get_word_embeddings()
-                mask_avg = (W[self.aa_mask_id] + W[self.struct_mask_id]) / 2
-                self.corruption_bias.copy_(mask_avg)
+                # W = self._get_word_embeddings()
+                # mask_avg = (W[self.aa_mask_id] + W[self.struct_mask_id]) / 2
+                # self.corruption_bias.copy_(mask_avg)
+                self.corruption_bias.zero_()  # zero init for aligning dplm2
         except Exception:
             pass  # keep zero init
 
@@ -220,6 +236,7 @@ class CANDIDiffusionProteinLanguageModel(
 
         # 3. Get clean embeddings for all positions
         W = self._get_word_embeddings()  # [V, d]
+        # W[self.aa_mask_id] = torch.zeros_like(W[self.aa_mask_id])  # align with dplm2
         clean_embeds = W[x_0]  # [B, L, d]
 
         # 4. Compute noisy embeddings for corrupted positions
@@ -487,28 +504,22 @@ class CANDIDiffusionProteinLanguageModel(
     # Inference: hybrid decoding (continuous ODE + discrete unmasking)
     # ------------------------------------------------------------------
     def _init_candi_inference_state(self, output_tokens, output_masks):
-        """
-        Initialize CANDI inference state: noisy embedding cache and clean mask.
-
-        Called on the first decoding step.
-        """
+        """Initialize noisy embedding cache and clean mask for CANDI inference."""
         B, L = output_tokens.shape
         device = output_tokens.device
         W = self._get_word_embeddings()
         d = W.shape[1]
         noise_space = self.cfg.candi.noise_space
 
-        # Initial sigma at t = T (max noise)
         t_init = torch.tensor(
             [self.cfg.num_diffusion_timesteps], device=device
         )
         sigma_init = self.noise_schedule.get_sigma(t_init, noise_space).item()
 
-        # Sample initial noisy embeddings for corrupted positions
         type_ids = self.get_modality_type(output_tokens)
 
         if noise_space == "onehot":
-            y_cache = torch.zeros(B, L, d, device=device)
+            y_cache = torch.zeros(B, L, d, device=device, dtype=W.dtype)
             for mod_type, v_start, v_end in [
                 (self.aa_type, 0, 33),
                 (self.struct_type, 33, W.shape[0]),
@@ -521,94 +532,54 @@ class CANDIDiffusionProteinLanguageModel(
                 eps = torch.randn(n, V_mod, device=device, dtype=W.dtype)
                 y_cache[pos] = sigma_init * (eps @ W[v_start:v_end])
         else:
-            y_cache = sigma_init * torch.randn(B, L, d, device=device, dtype=W.dtype)
+            y_cache = sigma_init * torch.randn(
+                B, L, d, device=device, dtype=W.dtype
+            )
 
-        # Clean mask: special tokens start as "clean"
         clean_mask = ~output_masks
-
         return y_cache, clean_mask
 
-    def forward_decoder(
-        self,
-        prev_decoder_out,
-        need_attn_weights=False,
-        partial_masks=None,
-        sampling_strategy="annealing@2.2:1.0",
-        feedforward_mode="discrete",
-        mask_emb_mode="add",
-        linear_kwargs=None,
+    def _candi_forward_step(
+        self, output_tokens, y_cache, clean_mask, output_masks, sigma_curr,
+        temperature,
     ):
         """
-        CANDI hybrid inference step.
+        Single CANDI forward pass shared by forward_decoder and generate.
 
-        Combines:
-        1. Continuous ODE step (refine noisy embeddings via score)
-        2. Discrete unmasking step (commit tokens at selected positions)
+        Constructs Y_t from clean/cached embeddings → model forward → sample.
 
-        State is carried across steps via y_cache and clean_mask in the
-        decoder output dict.
+        Returns:
+            _tokens:  [B, L] sampled token indices
+            _scores:  [B, L] log-prob confidence of sampled tokens
+            net_out:  dict with 'logits', 'last_hidden_state', 'log_probs'
         """
-        output_tokens = prev_decoder_out["output_tokens"].clone()
-        output_scores = prev_decoder_out["output_scores"].clone()
-        step = prev_decoder_out["step"]
-        max_step = prev_decoder_out["max_step"]
-        temperature = prev_decoder_out["temperature"]
-        history = prev_decoder_out["history"]
-
-        output_masks = self.get_non_special_symbol_mask(
-            output_tokens, partial_masks=partial_masks
-        )
-
-        # Map decoding step → CANDI timestep (decreasing from T to 0)
-        T = self.cfg.num_diffusion_timesteps
-        noise_space = self.cfg.candi.noise_space
-        t_disc_curr = max(int((1.0 - step / max_step) * T), 1)
-        t_disc_next = max(int((1.0 - (step + 1) / max_step) * T), 0)
-
-        sigma_curr = self.noise_schedule.get_sigma(
-            torch.tensor([t_disc_curr], device=output_tokens.device),
-            noise_space,
-        ).item()
-        sigma_next = self.noise_schedule.get_sigma(
-            torch.tensor([t_disc_next], device=output_tokens.device),
-            noise_space,
-        ).item()
-
-        alpha_curr = 1.0 - t_disc_curr / T
-        alpha_next = 1.0 - t_disc_next / T
-
-        # Initialize state on first step
-        if "y_cache" not in prev_decoder_out or prev_decoder_out.get("y_cache") is None:
-            y_cache, clean_mask = self._init_candi_inference_state(
-                output_tokens, output_masks
-            )
-        else:
-            y_cache = prev_decoder_out["y_cache"]
-            clean_mask = prev_decoder_out["clean_mask"]
-
         W = self._get_word_embeddings()
+        B, L = output_tokens.shape
+        device = output_tokens.device
 
-        # 1. Construct Y_t: clean positions use token embeds, corrupted use cache
-        clean_embeds = W[output_tokens]  # [B, L, d]
+        # 1. Construct Y_t
+        clean_embeds = W[output_tokens]
         clean_f = clean_mask.unsqueeze(-1).float()
         Y_t = clean_f * clean_embeds + (1 - clean_f) * y_cache
 
-        # Add sigma embedding
+        # Sigma embedding
         if self.sigma_embedding is not None:
-            B, L = output_tokens.shape
             sigma_per_pos = torch.where(
                 clean_mask,
-                torch.zeros(B, L, device=output_tokens.device),
-                torch.full((B, L), sigma_curr, device=output_tokens.device),
+                torch.zeros(B, L, device=device),
+                torch.full((B, L), sigma_curr, device=device),
             )
             Y_t = Y_t + self.sigma_embedding(sigma_per_pos)
 
-        # Apply preconditioning + corruption bias to corrupted positions
+        # Preconditioning + corruption bias
         corrupted = ~clean_mask & output_masks
         if corrupted.any() and sigma_curr > 0:
             lam = self.cfg.candi.lambda_bias
             c_in = 1.0 / math.sqrt(sigma_curr**2 + 1.0)
-            precond = (1 - lam) * Y_t[corrupted] * c_in + lam * self.corruption_bias
+            precond = (
+                (1 - lam) * Y_t[corrupted] * c_in
+                + lam * self.corruption_bias
+            )
             Y_t = Y_t.clone()
             Y_t[corrupted] = precond
 
@@ -621,65 +592,155 @@ class CANDIDiffusionProteinLanguageModel(
 
         # Modality-specific vocab masking
         type_ids = self.get_modality_type(output_tokens)
-        aa_pos = type_ids.eq(self.aa_type) & output_masks
-        struct_pos = type_ids.eq(self.struct_type) & output_masks
-        idx_aa = torch.where(aa_pos)
-        idx_struct = torch.where(struct_pos)
+        idx_aa = torch.where(type_ids.eq(self.aa_type) & output_masks)
+        idx_struct = torch.where(
+            type_ids.eq(self.struct_type) & output_masks
+        )
         logits[idx_aa[0], idx_aa[1], 33:] = -math.inf
         logits[idx_struct[0], idx_struct[1], :33] = -math.inf
         logits[..., self.special_token_list] = -math.inf
 
-        # 3. Sample tokens from logits
+        # 3. Sample
         log_probs = logits.log_softmax(dim=-1)
-        if sampling_strategy.startswith("annealing"):
-            max_temp, min_temp = map(
-                float, sampling_strategy.split("@")[1].split(":")
-            )
-            rate = 1 - step / max_step
-            temperature = min_temp + (max_temp - min_temp) * rate
-
         _tokens, _scores = sample_from_categorical(
             log_probs, temperature=temperature
         )
+        net_out["log_probs"] = log_probs
+        return _tokens, _scores, net_out
 
-        # 4. Discrete unmasking step
-        still_corrupted = ~clean_mask & output_masks
-        if alpha_curr < 1.0 and t_disc_next < t_disc_curr:
-            unmask_prob = (alpha_next - alpha_curr) / (1.0 - alpha_curr + 1e-8)
-            u = torch.rand_like(output_tokens.float())
-            newly_clean = (u < unmask_prob) & still_corrupted
+    def _select_topk_to_unmask(self, _scores, still_corrupted, k_per_sample):
+        """
+        Select top-k most confident positions among corrupted ones to unmask.
 
+        Args:
+            _scores:          [B, L] log-prob confidence
+            still_corrupted:  [B, L] bool mask of positions still corrupted
+            k_per_sample:     [B] number of positions to unmask per sample
+
+        Returns:
+            newly_clean: [B, L] bool mask of positions to unmask this step
+        """
+        B, L = _scores.shape
+        device = _scores.device
+
+        scores_for_topk = _scores.clone()
+        scores_for_topk[~still_corrupted] = -1e9
+
+        sorted_scores, sorted_idx = scores_for_topk.sort(
+            dim=1, descending=True
+        )
+        j_range = torch.arange(L, device=device).unsqueeze(0)
+        topk_mask_sorted = j_range < k_per_sample.unsqueeze(1)
+
+        newly_clean = torch.zeros_like(still_corrupted)
+        newly_clean.scatter_(1, sorted_idx, topk_mask_sorted)
+        newly_clean = newly_clean & still_corrupted
+        return newly_clean
+
+    def generate(
+        self,
+        input_tokens,
+        max_iter=None,
+        temperature=1.0,
+        partial_masks=None,
+        sampling_strategy="annealing@2.0:0.1",
+        **kwargs,
+    ):
+        """
+        CANDI hybrid generation loop.
+
+        At each step:
+          1. Forward pass → logits → sample tokens
+          2. Discrete step: unmask top-k most confident corrupted positions
+          3. Continuous step: ODE-refine y_cache for still-corrupted positions
+
+        Similar to DPLM2.generate() but replaces discrete mask-only decoding
+        with hybrid continuous-discrete decoding.
+        """
+        self.eval()
+        T = self.cfg.num_diffusion_timesteps
+        noise_space = self.cfg.candi.noise_space
+        device = input_tokens.device
+
+        # 0. Initialize: all maskable positions → mask tokens
+        output_tokens, output_scores = self.initialize_output_tokens(
+            input_tokens, partial_masks=partial_masks
+        )
+        output_masks = self.get_non_special_symbol_mask(
+            output_tokens, partial_masks=partial_masks
+        )
+
+        # CANDI state
+        y_cache, clean_mask = self._init_candi_inference_state(
+            output_tokens, output_masks
+        )
+        history = [output_tokens.clone()]
+
+        for step in range(max_iter):
+            is_final = step == max_iter - 1
+
+            # Timestep mapping (decreasing from T to 0)
+            t_curr = max(int((1.0 - step / max_iter) * T), 1)
+            t_next = max(int((1.0 - (step + 1) / max_iter) * T), 0)
+            sigma_curr = self.noise_schedule.get_sigma(
+                torch.tensor([t_curr], device=device), noise_space
+            ).item()
+            sigma_next = self.noise_schedule.get_sigma(
+                torch.tensor([t_next], device=device), noise_space
+            ).item()
+            alpha_curr = 1.0 - t_curr / T
+            alpha_next = 1.0 - t_next / T
+
+            # Temperature annealing
+            if sampling_strategy.startswith("annealing"):
+                max_temp, min_temp = map(
+                    float, sampling_strategy.split("@")[1].split(":")
+                )
+                rate = 1.0 - step / max_iter
+                cur_temp = min_temp + (max_temp - min_temp) * rate
+            else:
+                cur_temp = temperature
+
+            # 1. Forward pass → logits → sample tokens
+            with torch.no_grad():
+                _tokens, _scores, net_out = self._candi_forward_step(
+                    output_tokens, y_cache, clean_mask,
+                    output_masks, sigma_curr, cur_temp,
+                )
+
+            # 2. Discrete step: unmask top-k by confidence
+            still_corrupted = ~clean_mask & output_masks
+
+            if is_final:
+                newly_clean = still_corrupted
+            elif still_corrupted.any():
+                unmask_rate = (alpha_next - alpha_curr) / (
+                    1.0 - alpha_curr + 1e-8
+                )
+                n_corrupted = still_corrupted.sum(dim=1)
+                k_per_sample = (
+                    unmask_rate * n_corrupted.float()
+                ).ceil().long().clamp(min=1)
+                newly_clean = self._select_topk_to_unmask(
+                    _scores, still_corrupted, k_per_sample,
+                )
+            else:
+                newly_clean = torch.zeros_like(still_corrupted)
+
+            # Commit tokens at newly unmasked positions
             output_tokens[newly_clean] = _tokens[newly_clean]
             output_scores[newly_clean] = _scores[newly_clean]
             clean_mask = clean_mask | newly_clean
 
-        # 5. Continuous ODE step for still-corrupted positions
-        still_corrupted = ~clean_mask & output_masks
-        if still_corrupted.any() and sigma_curr > 0 and sigma_next > 0:
-            E_Y0 = W[_tokens]  # Monte Carlo estimate of E[Y_0|Y_t]
-            score = -(y_cache - E_Y0) / (sigma_curr**2)
-            dt = 0.5 * (sigma_curr**2 - sigma_next**2)
-            y_cache = y_cache - dt * score
+            # 3. Continuous ODE step for still-corrupted positions
+            still_corrupted = ~clean_mask & output_masks
+            if still_corrupted.any() and sigma_curr > 0 and sigma_next > 0:
+                W = self._get_word_embeddings()
+                E_Y0 = W[_tokens]
+                score = -(y_cache - E_Y0) / (sigma_curr**2)
+                dt = 0.5 * (sigma_curr**2 - sigma_next**2)
+                y_cache = y_cache - dt * score
 
-        # 6. Final step: unmask everything
-        if t_disc_next == 0:
-            remaining = ~clean_mask & output_masks
-            output_tokens[remaining] = _tokens[remaining]
-            output_scores[remaining] = _scores[remaining]
-            clean_mask = clean_mask | remaining
+            history.append(output_tokens.clone())
 
-        history.append(output_tokens.clone())
-
-        return dict(
-            output_tokens=output_tokens,
-            output_scores=output_scores,
-            attentions=None,
-            step=step + 1,
-            max_step=max_step,
-            history=history,
-            hidden_states=net_out["last_hidden_state"],
-            logits=log_probs,
-            y_cache=y_cache,
-            clean_mask=clean_mask,
-            temperature=temperature,
-        )
+        return {"output_tokens": output_tokens}

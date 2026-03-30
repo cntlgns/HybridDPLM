@@ -37,12 +37,12 @@ model:
   # --- Training stage ---
   # "train_from_dplm": start from DPLM (sequence-only), expand vocab (same as original DPLM2)
   # "finetune_from_dplm2_hf": start from HuggingFace DPLM2 (struct tokens already trained)
-  training_stage: train_from_dplm
+  training_stage: finetune_from_dplm2_hf
   # --- Multi-task ratios ---
-  single_modality_ratio: 0.25
-  folding_loss_ratio: 0.25
-  inverse_folding_loss_ratio: 0.25
-  joint_loss_ratio: 0.25
+  single_modality_ratio: 0
+  folding_loss_ratio: 0
+  inverse_folding_loss_ratio: 1
+  joint_loss_ratio: 0
   independent_loss_ratio: 0.0
   # --- CANDI-specific config ---
   candi:
@@ -73,8 +73,8 @@ model:
     arch_type: esm
     name: airkingbd/dplm_650m
     dropout: 0.1
-    pretrain: true
-    pretrained_model_name_or_path: airkingbd/dplm_650m
+    pretrain: false
+    pretrained_model_name_or_path: airkingbd/dplm2_650m
   # --- Self-mixup (disabled for CANDI) ---
   self_mixup:
     enable: false
