@@ -541,18 +541,28 @@ class CANDIDiffusionProteinLanguageModel(
 
     def _candi_forward_step(
         self, output_tokens, y_cache, clean_mask, output_masks, sigma_curr,
-        temperature,
+        temperature, ref_input_ids=None,
     ):
         """
         Single CANDI forward pass shared by forward_decoder and generate.
 
         Constructs Y_t from clean/cached embeddings → model forward → sample.
 
+        Args:
+            ref_input_ids: Optional [B, L] token indices to use as input_ids
+                for the forward pass. When provided, these should not contain
+                mask tokens so that ESM's token_dropout applies only the 0.88
+                scaling (matching training) without zeroing any positions.
+                If None, falls back to output_tokens.
+
         Returns:
             _tokens:  [B, L] sampled token indices
             _scores:  [B, L] log-prob confidence of sampled tokens
             net_out:  dict with 'logits', 'last_hidden_state', 'log_probs'
         """
+        if ref_input_ids is None:
+            ref_input_ids = output_tokens
+
         W = self._get_word_embeddings()
         B, L = output_tokens.shape
         device = output_tokens.device
@@ -583,14 +593,15 @@ class CANDIDiffusionProteinLanguageModel(
             Y_t = Y_t.clone()
             Y_t[corrupted] = precond
 
-        # 2. Forward pass
+        # 2. Forward pass — use ref_input_ids (mask-free) so that ESM's
+        #    token_dropout applies the 0.88 scaling without zeroing positions.
         net_out = self.forward(
-            input_ids=output_tokens,
+            input_ids=ref_input_ids,
             inputs_embeds_override=Y_t,
         )
         logits = net_out["logits"]
 
-        # Modality-specific vocab masking
+        # Modality-specific vocab masking (use output_tokens for type_ids)
         type_ids = self.get_modality_type(output_tokens)
         idx_aa = torch.where(type_ids.eq(self.aa_type) & output_masks)
         idx_struct = torch.where(
@@ -606,6 +617,7 @@ class CANDIDiffusionProteinLanguageModel(
             log_probs, temperature=temperature
         )
         net_out["log_probs"] = log_probs
+        # import ipdb; ipdb.set_trace()
         return _tokens, _scores, net_out
 
     def _select_topk_to_unmask(self, _scores, still_corrupted, k_per_sample):
@@ -676,6 +688,12 @@ class CANDIDiffusionProteinLanguageModel(
         )
         history = [output_tokens.clone()]
 
+        # ref_tokens: mask-free version of output_tokens used as input_ids
+        # so that ESM's token_dropout applies 0.88 scaling (matching training)
+        # without zeroing any positions. Initialized from output_tokens;
+        # corrupted positions are updated with model predictions each step.
+        ref_tokens = output_tokens.clone()
+
         for step in range(max_iter):
             is_final = step == max_iter - 1
 
@@ -706,10 +724,15 @@ class CANDIDiffusionProteinLanguageModel(
                 _tokens, _scores, net_out = self._candi_forward_step(
                     output_tokens, y_cache, clean_mask,
                     output_masks, sigma_curr, cur_temp,
+                    ref_input_ids=ref_tokens,
                 )
+
+            # Update ref_tokens with predictions for all maskable positions
+            ref_tokens[output_masks] = _tokens[output_masks]
 
             # 2. Discrete step: unmask top-k by confidence
             still_corrupted = ~clean_mask & output_masks
+            # import ipdb; ipdb.set_trace()
 
             if is_final:
                 newly_clean = still_corrupted
@@ -726,6 +749,7 @@ class CANDIDiffusionProteinLanguageModel(
                 )
             else:
                 newly_clean = torch.zeros_like(still_corrupted)
+            # import ipdb; ipdb.set_trace()
 
             # Commit tokens at newly unmasked positions
             output_tokens[newly_clean] = _tokens[newly_clean]
