@@ -65,6 +65,9 @@ class CANDISpecificConfig:
 @dataclass
 class DPLM2CANDIConfig(DPLM2Config):
     candi: CANDISpecificConfig = field(default_factory=CANDISpecificConfig)
+    # Whether ESM's embedding layer applies token_dropout (0.88 scaling).
+    # Set False for CANDI since we provide soft embeddings, not discrete tokens.
+    token_dropout: bool = field(default=False)
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +121,17 @@ class CANDIDiffusionProteinLanguageModel(
             net = self._load_dplm2_from_hf(cfg)
 
         super().__init__(cfg, net)
+
+        # Apply token_dropout setting from config
+        if hasattr(cfg, "token_dropout"):
+            emb = self.net.esm.embeddings
+            # Handle PEFT ModulesToSaveWrapper
+            if hasattr(emb, "original_module"):
+                emb.original_module.token_dropout = cfg.token_dropout
+                for mod in emb.modules_to_save.values():
+                    mod.token_dropout = cfg.token_dropout
+            else:
+                emb.token_dropout = cfg.token_dropout
 
         d_model = self.net.config.hidden_size
 

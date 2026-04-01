@@ -39,10 +39,10 @@ model:
   # "finetune_from_dplm2_hf": start from HuggingFace DPLM2 (struct tokens already trained)
   training_stage: finetune_from_dplm2_hf
   # --- Multi-task ratios ---
-  single_modality_ratio: 0
-  folding_loss_ratio: 0
-  inverse_folding_loss_ratio: 1
-  joint_loss_ratio: 0
+  single_modality_ratio: 0.05
+  folding_loss_ratio: 0.1
+  inverse_folding_loss_ratio: 0.7
+  joint_loss_ratio: 0.15
   independent_loss_ratio: 0.0
   # --- CANDI-specific config ---
   candi:
@@ -53,18 +53,20 @@ model:
     r_min: 0.01
     r_max: 0.25
     # Embedding VE-SDE schedule
-    sigma_min: 0.01
-    sigma_max: 2.0
+    sigma_min: 0.5
+    sigma_max: 10.0
     # Corruption bias mixing: 0 = pure noisy, 1 = pure bias (like mask token)
     lambda_bias: 0.5
     # Add learned sigma embedding to model input
     use_sigma_embed: true
     # Loss weight: "candi" (ELBO 1/t) or "linear" (original DPLM2)
-    loss_weight: candi
+    loss_weight: constant
+  # --- ESM embedding config ---
+  token_dropout: false
   # --- LoRA config ---
   lora:
     enable: true
-    lora_rank: 16
+    lora_rank: 64
     lora_dropout: 0.1
     lora_target_module: (esm.encoder.layer.[0-9]*.attention.(self.query|self.key|self.value|output.dense).*|esm.encoder.layer.[0-9]*.(intermediate|output).dense.*)
     modules_to_save: lm_head,esm.embeddings
@@ -91,7 +93,7 @@ task:
     watch_t1_t2_loss: false
     cal_constant_loss: true
     # Use CANDI loss weighting (passed to model.compute_loss)
-    weight: candi
+    weight: constant
   criterion:
     _target_: byprot.modules.cross_entropy.StructAARDMCrossEntropyLoss
     label_smoothing: 0.0
@@ -115,14 +117,14 @@ task:
 
 train:
   seed: 42
-  lr: 1e-4
+  lr: 3e-5
   monitor: "val/loss"
   mode: "min"
-  patience: 1000
+  patience: 5
 
 trainer:
-  min_epochs: 10
-  max_epochs: 10000
+  min_epochs: 5
+  max_epochs: 20
   gradient_clip_val: 0.5
   num_sanity_val_steps: 1
   reload_dataloaders_every_n_epochs: 1
