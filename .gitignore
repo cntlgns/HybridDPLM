@@ -161,7 +161,13 @@ byprot-checkpoints/
 generation-results/
 data-bin/
 outputs/
+logs
+logs/
+train_logs
+train_logs/
 data-bin/scaffolding-pdbs/*.pdb
 temp.ipynb
 # run/
 length_analyze/
+.claude/
+.codex
