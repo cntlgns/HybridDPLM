@@ -214,6 +214,16 @@ class DPLM2TrainingTask(TaskLitModule):
         )
         self.log("lr", self.lrate, on_step=True, on_epoch=False, prog_bar=True)
 
+        # Log lambda_bias if model supports annealing
+        if hasattr(self.model, "get_lambda_bias"):
+            self.log(
+                "train/lambda_bias",
+                self.model.get_lambda_bias(),
+                on_step=True,
+                on_epoch=False,
+                prog_bar=False,
+            )
+
         for log_key in logging_output:
             log_value = logging_output[log_key]
             self.log(

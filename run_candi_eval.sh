@@ -8,6 +8,9 @@
 
 set -e
 
+# Activate project virtualenv
+source /data_fast/home/sihun/diffprotein/dplm/.venv/bin/activate
+
 CKPT_PATH="$1"
 DATASET="${2:-all}"           # cameo2022, PDB_date, or all (default: all)
 SAMPLING="${3:-argmax}"
@@ -67,6 +70,9 @@ for DS in "${DATASETS[@]}"; do
     echo "  Sampling:  $SAMPLING"
     echo "  Max iter:  $MAX_ITER"
     echo "=============================================="
+
+    # Touch the candi module to force reload
+    touch /home/sihun/diffprotein/dplm/src/byprot/models/dplm2/dplm2_candi.py
 
     # Step 1: Generate
     python generate_dplm2_candi.py \

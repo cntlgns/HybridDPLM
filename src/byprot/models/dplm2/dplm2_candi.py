@@ -53,10 +53,20 @@ class CANDISpecificConfig:
     # lambda=0 → pure noisy embedding; lambda=1 → pure bias (like mask token)
     lambda_bias: float = field(default=0.5)
 
+    # Lambda bias annealing: start from lambda_bias_init and linearly anneal
+    # to lambda_bias over lambda_bias_anneal_steps training steps.
+    # Set lambda_bias_anneal_steps=0 to disable annealing (use fixed lambda_bias).
+    lambda_bias_init: float = field(default=1.0)
+    lambda_bias_anneal_steps: int = field(default=0)
+
     # Whether to add a learned sigma embedding to the input.
     # If True, a small MLP maps per-position sigma values to d-dimensional
     # vectors that are added to the embeddings (helps the model know noise level).
     use_sigma_embed: bool = field(default=True)
+
+    # Whether to learn the corruption bias parameter.
+    # If False, corruption_bias is frozen (requires_grad=False).
+    learn_corruption_bias: bool = field(default=True)
 
     # Loss weighting: "candi" (ELBO-derived 1/t) or "linear" (original DPLM2)
     loss_weight: str = field(default="candi")
@@ -137,7 +147,10 @@ class CANDIDiffusionProteinLanguageModel(
 
         # Corruption bias: learned embedding for corrupted positions.
         # Initialized from average of mask token embeddings.
-        self.corruption_bias = nn.Parameter(torch.zeros(d_model))
+        self.corruption_bias = nn.Parameter(
+            torch.zeros(d_model),
+            requires_grad=self.cfg.candi.learn_corruption_bias,
+        )
         self._init_corruption_bias()
 
         # Noise schedule
@@ -148,6 +161,9 @@ class CANDIDiffusionProteinLanguageModel(
             sigma_min=self.cfg.candi.sigma_min,
             sigma_max=self.cfg.candi.sigma_max,
         )
+
+        # Lambda bias annealing state
+        self._train_step = 0
 
         # Optional sigma embedding
         if self.cfg.candi.use_sigma_embed:
@@ -216,6 +232,16 @@ class CANDIDiffusionProteinLanguageModel(
                 self.corruption_bias.zero_()  # zero init for aligning dplm2
         except Exception:
             pass  # keep zero init
+
+    def get_lambda_bias(self):
+        """Return current lambda_bias, accounting for annealing schedule."""
+        anneal_steps = self.cfg.candi.lambda_bias_anneal_steps
+        if anneal_steps <= 0 or not self.training:
+            return self.cfg.candi.lambda_bias
+        progress = min(self._train_step / anneal_steps, 1.0)
+        lam_init = self.cfg.candi.lambda_bias_init
+        lam_final = self.cfg.candi.lambda_bias
+        return lam_init + (lam_final - lam_init) * progress
 
     # ------------------------------------------------------------------
     # CANDI hybrid noising
@@ -286,7 +312,7 @@ class CANDIDiffusionProteinLanguageModel(
         """
         B, L, d = clean_embeds.shape
         device = clean_embeds.device
-        lam = self.cfg.candi.lambda_bias
+        lam = self.get_lambda_bias()
         soft_embeds = clean_embeds.clone()
 
         for modality_type, vocab_start, vocab_end in [
@@ -326,7 +352,7 @@ class CANDIDiffusionProteinLanguageModel(
         """
         B, L, d = clean_embeds.shape
         device = clean_embeds.device
-        lam = self.cfg.candi.lambda_bias
+        lam = self.get_lambda_bias()
         soft_embeds = clean_embeds.clone()
 
         if not mask_t.any():
@@ -447,6 +473,9 @@ class CANDIDiffusionProteinLanguageModel(
         The return signature matches the parent so that the existing
         StructAARDMCrossEntropyLoss criterion works unchanged.
         """
+        if self.training:
+            self._train_step += 1
+
         if weighting is None:
             weighting = self.cfg.candi.loss_weight
 
@@ -598,7 +627,7 @@ class CANDIDiffusionProteinLanguageModel(
         # Preconditioning + corruption bias
         corrupted = ~clean_mask & output_masks
         if corrupted.any() and sigma_curr > 0:
-            lam = self.cfg.candi.lambda_bias
+            lam = self.get_lambda_bias()
             c_in = 1.0 / math.sqrt(sigma_curr**2 + 1.0)
             precond = (
                 (1 - lam) * Y_t[corrupted] * c_in

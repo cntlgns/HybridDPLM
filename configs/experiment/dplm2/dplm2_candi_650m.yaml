@@ -39,10 +39,10 @@ model:
   # "finetune_from_dplm2_hf": start from HuggingFace DPLM2 (struct tokens already trained)
   training_stage: finetune_from_dplm2_hf
   # --- Multi-task ratios ---
-  single_modality_ratio: 0.05
-  folding_loss_ratio: 0.1
-  inverse_folding_loss_ratio: 0.7
-  joint_loss_ratio: 0.15
+  single_modality_ratio: 0.0
+  folding_loss_ratio: 0.0
+  inverse_folding_loss_ratio: 1.0
+  joint_loss_ratio: 0.0
   independent_loss_ratio: 0.0
   # --- CANDI-specific config ---
   candi:
@@ -54,11 +54,17 @@ model:
     r_max: 0.25
     # Embedding VE-SDE schedule
     sigma_min: 0.5
-    sigma_max: 10.0
+    sigma_max: 5.0
     # Corruption bias mixing: 0 = pure noisy, 1 = pure bias (like mask token)
     lambda_bias: 0.5
+    # Lambda bias annealing: start from lambda_bias_init, linearly anneal to
+    # lambda_bias over lambda_bias_anneal_steps steps. 0 = disabled.
+    lambda_bias_init: 1.0
+    lambda_bias_anneal_steps: 5000
+    # Whether to learn the corruption bias parameter (false = frozen at init)
+    learn_corruption_bias: false
     # Add learned sigma embedding to model input
-    use_sigma_embed: true
+    use_sigma_embed: false
     # Loss weight: "candi" (ELBO 1/t) or "linear" (original DPLM2)
     loss_weight: constant
   # --- ESM embedding config ---
@@ -66,7 +72,7 @@ model:
   # --- LoRA config ---
   lora:
     enable: true
-    lora_rank: 64
+    lora_rank: 32
     lora_dropout: 0.1
     lora_target_module: (esm.encoder.layer.[0-9]*.attention.(self.query|self.key|self.value|output.dense).*|esm.encoder.layer.[0-9]*.(intermediate|output).dense.*)
     modules_to_save: lm_head,esm.embeddings
@@ -111,20 +117,20 @@ task:
     warmup_steps: 2000
     total_steps: ${trainer.max_steps}
     lr: ${train.lr}
-    lr_end: 1e-5
+    lr_end: 1e-7
     warmup_init_lr: 1e-07
-    power: 1
+    power: 2
 
 train:
   seed: 42
-  lr: 3e-5
+  lr: 1e-5
   monitor: "val/loss"
   mode: "min"
-  patience: 5
+  patience: 20
 
 trainer:
   min_epochs: 5
-  max_epochs: 20
+  max_epochs: 10
   gradient_clip_val: 0.5
   num_sanity_val_steps: 1
   reload_dataloaders_every_n_epochs: 1
@@ -132,6 +138,6 @@ trainer:
   max_steps: 100_000
   accumulate_grad_batches: 1
   check_val_every_n_epoch: null
-  val_check_interval: 500
+  val_check_interval: 250
   enable_progress_bar: true
   num_nodes: 1
