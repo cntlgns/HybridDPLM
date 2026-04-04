@@ -615,15 +615,6 @@ class CANDIDiffusionProteinLanguageModel(
         clean_f = clean_mask.unsqueeze(-1).float()
         Y_t = clean_f * clean_embeds + (1 - clean_f) * y_cache
 
-        # Sigma embedding
-        if self.sigma_embedding is not None:
-            sigma_per_pos = torch.where(
-                clean_mask,
-                torch.zeros(B, L, device=device),
-                torch.full((B, L), sigma_curr, device=device),
-            )
-            Y_t = Y_t + self.sigma_embedding(sigma_per_pos)
-
         # Preconditioning + corruption bias
         corrupted = ~clean_mask & output_masks
         if corrupted.any() and sigma_curr > 0:
@@ -635,6 +626,15 @@ class CANDIDiffusionProteinLanguageModel(
             )
             Y_t = Y_t.clone()
             Y_t[corrupted] = precond
+
+        # Sigma embedding (added after preconditioning, matching training)
+        if self.sigma_embedding is not None:
+            sigma_per_pos = torch.where(
+                clean_mask,
+                torch.zeros(B, L, device=device),
+                torch.full((B, L), sigma_curr, device=device),
+            )
+            Y_t = Y_t + self.sigma_embedding(sigma_per_pos)
 
         # 2. Forward pass — use ref_input_ids (mask-free) so that ESM's
         #    token_dropout applies the 0.88 scaling without zeroing positions.
