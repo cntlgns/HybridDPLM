@@ -158,6 +158,7 @@ run/logs
 *.pdb
 
 byprot-checkpoints/
+generation-results
 generation-results/
 data-bin/
 outputs/
