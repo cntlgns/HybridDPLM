@@ -1,13 +1,13 @@
 """
-SLURM launcher for candi eval experiments.
+SLURM launcher for hybrid eval experiments.
 Finds all .ckpt files under CKPT_ROOT, skips those already evaluated,
 and submits jobs for the rest on rtx3090 x1.
 
 Usage:
-    python run_candi_eval.py <ckpt_root_dir>
+    python run_hybrid_eval.py <ckpt_root_dir>
 
 Example:
-    python run_candi_eval.py /data_fast/home/sihun/diffprotein/dplm/train_logs/candi_const_weight_ft5/checkpoints
+    python run_hybrid_eval.py /data_fast/home/sihun/diffprotein/dplm/train_logs/candi_const_weight_ft5/checkpoints
 """
 import sys
 import os
@@ -21,8 +21,8 @@ PART_TO_PY = {
 }
 
 PROJECT_DIR = "/data_fast/home/sihun/diffprotein/dplm"
-SCRIPT_PATH = f"{PROJECT_DIR}/run_candi_eval.sh"
-RESULT_BASE = f"{PROJECT_DIR}/generation-results/candi_invfold_test"
+SCRIPT_PATH = f"{PROJECT_DIR}/run_hybrid_eval.sh"
+RESULT_BASE = f"{PROJECT_DIR}/generation-results/hybrid_invfold_test"
 
 DATASETS = ["cameo2022", "PDB_date"] # "cameo2022", "PDB_date"
 EXCLUDE_CKPTS = {"best.ckpt", "last.ckpt"}
@@ -134,7 +134,7 @@ def run_slurm(ckpt_root: str):
         exclude="pearl,nobel,ohm,poincare,quant,rene,radish,kiwi",
         qos="normal",
         timeout="3-0",
-        job_name="candi_eval",
+        job_name="hybrid_eval",
         max_job_num=50,
         part_to_py=PART_TO_PY,
     )
@@ -142,8 +142,8 @@ def run_slurm(ckpt_root: str):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python run_candi_eval.py <ckpt_root_dir>")
-        print("Example: python run_candi_eval.py train_logs/candi_const_weight_ft5/checkpoints")
+        print("Usage: python run_hybrid_eval.py <ckpt_root_dir>")
+        print("Example: python run_hybrid_eval.py train_logs/candi_const_weight_ft5/checkpoints")
         sys.exit(1)
 
     ckpt_root = sys.argv[1]

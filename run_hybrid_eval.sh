@@ -1,10 +1,10 @@
 #!/bin/bash
-# Usage: bash run_candi_eval.sh <ckpt_path> [dataset] [sampling_strategy] [max_iter]
+# Usage: bash run_hybrid_eval.sh <ckpt_path> [dataset] [sampling_strategy] [max_iter]
 #
 # Example:
-#   bash run_candi_eval.sh train_logs/candi_const_weight_ft/checkpoints/step_63999.0-loss_0.00.ckpt
-#   bash run_candi_eval.sh train_logs/candi_const_weight_ft/checkpoints/step_63999.0-loss_0.00.ckpt cameo2022
-#   bash run_candi_eval.sh train_logs/candi_const_weight_ft/checkpoints/step_63999.0-loss_0.00.ckpt all "annealing@2.0:0.1" 50
+#   bash run_hybrid_eval.sh train_logs/candi_const_weight_ft/checkpoints/step_63999.0-loss_0.00.ckpt
+#   bash run_hybrid_eval.sh train_logs/candi_const_weight_ft/checkpoints/step_63999.0-loss_0.00.ckpt cameo2022
+#   bash run_hybrid_eval.sh train_logs/candi_const_weight_ft/checkpoints/step_63999.0-loss_0.00.ckpt all "annealing@2.0:0.1" 50
 
 set -e
 
@@ -18,7 +18,7 @@ MAX_ITER="${4:-100}"
 BATCH_SIZE="${5:-50}"
 
 if [ -z "$CKPT_PATH" ]; then
-    echo "Usage: bash run_candi_eval.sh <ckpt_path> [dataset] [sampling_strategy] [max_iter]"
+    echo "Usage: bash run_hybrid_eval.sh <ckpt_path> [dataset] [sampling_strategy] [max_iter]"
     exit 1
 fi
 
@@ -86,9 +86,9 @@ fi
 for DS in "${DATASETS[@]}"; do
     INPUT_FASTA="data-bin/${DS}/struct.fasta"
     # Save results to local storage
-    LOCAL_SAVE_DIR="${LOCAL_BASE}/generation-results/candi_invfold_test/${EXP_NAME}/${DS}/${CKPT_BASENAME}"
+    LOCAL_SAVE_DIR="${LOCAL_BASE}/generation-results/hybrid_invfold_test/${EXP_NAME}/${DS}/${CKPT_BASENAME}"
     # Corresponding remote path for rsync target
-    REMOTE_SAVE_DIR="${REMOTE_RESULTS}/candi_invfold_test/${EXP_NAME}/${DS}/${CKPT_BASENAME}"
+    REMOTE_SAVE_DIR="${REMOTE_RESULTS}/hybrid_invfold_test/${EXP_NAME}/${DS}/${CKPT_BASENAME}"
 
     # Select metadata csv and data_dir matching the dataset
     if [ "$DS" = "PDB_date" ]; then
@@ -113,11 +113,11 @@ for DS in "${DATASETS[@]}"; do
     echo "  Max iter:  $MAX_ITER"
     echo "=============================================="
 
-    # Touch the candi module to force reload
-    # touch /home/sihun/diffprotein/dplm/src/byprot/models/dplm2/dplm2_candi.py
+    # Touch the hybrid module to force reload
+    # touch /home/sihun/diffprotein/dplm/src/byprot/models/dplm2/dplm2_hybrid.py
 
     # Step 1: Generate (using local checkpoint, saving to local storage)
-    python generate_dplm2_candi.py \
+    python generate_dplm2_hybrid.py \
         --ckpt_path "$CKPT_PATH" \
         --task inverse_folding \
         --input_fasta_path "$INPUT_FASTA" \

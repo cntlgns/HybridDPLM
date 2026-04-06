@@ -34,9 +34,9 @@ METRIC_COLS = [
 ]
 
 STAT_FUNCS = {
-    "mean": np.mean,
     "median": np.median,
-    "std": np.std,
+    "mean": np.mean,
+    # "std": np.std,
 }
 
 

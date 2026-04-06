@@ -1,18 +1,18 @@
 """
-CANDI hybrid diffusion generation script for DPLM2.
+Hybrid diffusion generation script for DPLM2.
 
 Usage examples:
 
-  # Inverse folding (struct → AA) from a finetuned CANDI checkpoint
-  python generate_dplm2_candi.py \
-      --ckpt_path logs/candi_invfold/checkpoints/last.ckpt \
+  # Inverse folding (struct → AA) from a finetuned hybrid checkpoint
+  python generate_dplm2_hybrid.py \
+      --ckpt_path logs/hybrid_invfold/checkpoints/last.ckpt \
       --task inverse_folding \
       --input_fasta_path data/test_struct.fasta \
       --max_iter 50 \
-      --saveto results/candi_invfold
+      --saveto results/hybrid_invfold
 
-  # Co-generation with HuggingFace DPLM2 weights (no CANDI finetuning)
-  python generate_dplm2_candi.py \
+  # Co-generation with HuggingFace DPLM2 weights (no Hybrid finetuning)
+  python generate_dplm2_hybrid.py \
       --model_name airkingbd/dplm2_650m \
       --task co_generation \
       --num_seqs 10 --seq_lens 100 \
@@ -34,22 +34,22 @@ from generate_dplm2 import (
     save_results,
 )
 
-from byprot.models.dplm2.dplm2_candi import CANDIDiffusionProteinLanguageModel
+from byprot.models.dplm2.dplm2_hybrid import HybridDiffusionProteinLanguageModel
 
 
-def load_candi_model(args):
-    """Load a CANDI model from either a local checkpoint or HuggingFace."""
+def load_hybrid_model(args):
+    """Load a hybrid model from either a local checkpoint or HuggingFace."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if args.ckpt_path:
         # Load from a local training checkpoint (.ckpt)
-        print(f"Loading CANDI model from checkpoint: {args.ckpt_path}")
-        model = CANDIDiffusionProteinLanguageModel.from_pretrained(
+        print(f"Loading hybrid model from checkpoint: {args.ckpt_path}")
+        model = HybridDiffusionProteinLanguageModel.from_pretrained(
             args.ckpt_path, from_huggingface=False
         )
     else:
-        # Load from HuggingFace DPLM2 and wrap with CANDI
-        # (uses default CANDI config; no CANDI-specific finetuning)
+        # Load from HuggingFace DPLM2 and wrap with Hybrid
+        # (uses default Hybrid config; no Hybrid-specific finetuning)
         print(f"Loading base DPLM2 model: {args.model_name}")
         from omegaconf import OmegaConf
 
@@ -62,7 +62,7 @@ def load_candi_model(args):
             "inverse_folding_loss_ratio": 1.0,
             "joint_loss_ratio": 0.0,
             "independent_loss_ratio": 0.0,
-            "candi": {
+            "hybrid": {
                 "noise_space": "embedding",
                 "r_min": 0.01,
                 "r_max": 0.25,
@@ -70,7 +70,7 @@ def load_candi_model(args):
                 "sigma_max": 5.0,
                 "lambda_bias": 0.9999,
                 "use_sigma_embed": False,
-                "loss_weight": "candi",
+                "loss_weight": "hybrid",
             },
             "lora": {
                 "enable": False,
@@ -93,7 +93,7 @@ def load_candi_model(args):
                 "exp_path": "airkingbd/struct_tokenizer",
             },
         })
-        model = CANDIDiffusionProteinLanguageModel(cfg)
+        model = HybridDiffusionProteinLanguageModel(cfg)
 
     model = model.eval().to(device)
     if issubclass(type(model.net), PeftModel):
@@ -104,14 +104,14 @@ def load_candi_model(args):
 
 def conditional_generate(args):
     """Generate sequences conditioned on structure (inverse folding) or vice versa."""
-    model, device = load_candi_model(args)
+    model, device = load_hybrid_model(args)
     tokenizer = model.tokenizer
 
     batches, name_lists = initialize_conditional_generation(
         args.input_fasta_path, tokenizer, device, args=args, model=model
     )
 
-    for i, batch in enumerate(tqdm(batches, desc=f"CANDI {args.task}")):
+    for i, batch in enumerate(tqdm(batches, desc=f"Hybrid {args.task}")):
         with torch.cuda.amp.autocast(dtype=torch.bfloat16):
             outputs = model.generate(
                 input_tokens=batch["input_tokens"],
@@ -135,7 +135,7 @@ def conditional_generate(args):
 
 def unconditional_generate(args):
     """Unconditional generation (co-generation, backbone, sequence)."""
-    model, device = load_candi_model(args)
+    model, device = load_hybrid_model(args)
     tokenizer = model.tokenizer
 
     for seq_len in args.seq_lens:
@@ -186,7 +186,7 @@ def unconditional_generate(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="CANDI hybrid diffusion generation for DPLM2"
+        description="Hybrid diffusion generation for DPLM2"
     )
 
     # Model loading
@@ -195,7 +195,7 @@ def main():
         "--ckpt_path",
         type=str,
         default="",
-        help="Path to finetuned CANDI checkpoint (.ckpt). "
+        help="Path to finetuned hybrid checkpoint (.ckpt). "
         "If empty, uses --model_name from HuggingFace.",
     )
     parser.add_argument(
@@ -239,7 +239,7 @@ def main():
 
     # Output
     parser.add_argument(
-        "--saveto", type=str, default="results/candi_generate"
+        "--saveto", type=str, default="generate-results/hybrid_generate"
     )
 
     args = parser.parse_args()

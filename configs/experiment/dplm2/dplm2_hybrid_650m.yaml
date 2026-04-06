@@ -1,26 +1,26 @@
 # @package _global_
 
-# DPLM2 + CANDI hybrid discrete-continuous diffusion finetuning
+# DPLM2 + Hybrid hybrid discrete-continuous diffusion finetuning
 #
-# This config finetunes DPLM2-650M with CANDI's hybrid noising:
+# This config finetunes DPLM2-650M with Hybrid's hybrid noising:
 #   - Discrete masking (same as DPLM2) + Continuous Gaussian noise
 #   - Decouples discrete identity corruption from continuous rank degradation
 #
 # Usage:
-#   python train.py experiment=dplm2/dplm2_candi_650m
+#   python train.py experiment=dplm2/dplm2_hybrid_650m
 #
 # To finetune from a pre-trained DPLM2 checkpoint instead of DPLM:
 #   1. Set training_stage to "finetune_from_dplm2_hf"
 #   2. Set net.pretrained_model_name_or_path to "airkingbd/dplm2_650m"
-#   3. Set net.pretrain to false (loading handled by CANDI class)
+#   3. Set net.pretrain to false (loading handled by Hybrid class)
 
 defaults:
   - /datamodule: tokenized_protein
   - /callbacks: lm
   - /trainer: ddp_bf16
 
-project: "DPLM2_CANDI_650m"
-name: "dplm2_candi_650m"
+project: "DPLM2_Hybrid_650m"
+name: "dplm2_hybrid_650m"
 
 datamodule:
   data_dir: ${paths.data_dir}
@@ -31,7 +31,7 @@ datamodule:
   max_len: 512
 
 model:
-  _target_: dplm2_candi
+  _target_: dplm2_hybrid
   num_diffusion_timesteps: 500
   gradient_ckpt: false
   # --- Training stage ---
@@ -44,8 +44,8 @@ model:
   inverse_folding_loss_ratio: 1.0
   joint_loss_ratio: 0.0
   independent_loss_ratio: 0.0
-  # --- CANDI-specific config ---
-  candi:
+  # --- Hybrid-specific config ---
+  hybrid:
     # "embedding": add noise in d-dim embedding space (memory efficient)
     # "onehot": add noise in one-hot space then map through W (principled but heavier)
     noise_space: embedding
@@ -65,7 +65,7 @@ model:
     learn_corruption_bias: false
     # Add learned sigma embedding to model input
     use_sigma_embed: false
-    # Loss weight: "candi" (ELBO 1/t) or "linear" (original DPLM2)
+    # Loss weight: "hybrid" (ELBO 1/t) or "linear" (original DPLM2)
     loss_weight: constant
   # --- ESM embedding config ---
   token_dropout: false
@@ -83,7 +83,7 @@ model:
     dropout: 0.1
     pretrain: false
     pretrained_model_name_or_path: airkingbd/dplm2_650m
-  # --- Self-mixup (disabled for CANDI) ---
+  # --- Self-mixup (disabled for Hybrid) ---
   self_mixup:
     enable: false
     with_original_loss: false
@@ -98,7 +98,7 @@ task:
   learning:
     watch_t1_t2_loss: false
     cal_constant_loss: true
-    # Use CANDI loss weighting (passed to model.compute_loss)
+    # Use Hybrid loss weighting (passed to model.compute_loss)
     weight: constant
   criterion:
     _target_: byprot.modules.cross_entropy.StructAARDMCrossEntropyLoss

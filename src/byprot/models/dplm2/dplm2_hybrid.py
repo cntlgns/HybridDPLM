@@ -1,13 +1,13 @@
-# CANDI hybrid discrete-continuous diffusion for DPLM2.
+# Hybrid discrete-continuous diffusion for DPLM2.
 #
-# Implements CANDI (Continuous And Discrete diffusion, Pynadath et al. 2025)
+# Implements hybrid diffusion (Continuous And Discrete diffusion, Pynadath et al. 2025)
 # on top of DPLM2's multimodal protein language model.
 #
 # Key changes from standard DPLM2:
 #   1. Hybrid noising: discrete masking + continuous Gaussian noise (instead of mask-only)
 #   2. Soft embedding input: model receives noisy embeddings, not discrete mask tokens
 #   3. Corruption bias + preconditioning for corrupted positions
-#   4. CANDI loss weighting: 1/(1 - alpha(t)) from the ELBO
+#   4. Hybrid loss weighting: 1/(1 - alpha(t)) from the ELBO
 #   5. Hybrid inference: continuous ODE step + discrete unmasking
 
 import math
@@ -18,7 +18,7 @@ import torch.nn as nn
 from omegaconf import OmegaConf
 
 from byprot.models import register_model
-from byprot.models.dplm2.candi_noise import CANDINoiseSchedule
+from byprot.models.dplm2.hybrid_noise import HybridNoiseSchedule
 from byprot.models.dplm2.dplm2 import (
     DPLM2Config,
     MultimodalDiffusionProteinLanguageModel,
@@ -35,7 +35,7 @@ except ImportError:
 # Config
 # ---------------------------------------------------------------------------
 @dataclass
-class CANDISpecificConfig:
+class HybridSpecificConfig:
     # Noise space: "onehot" adds Gaussian noise in one-hot space then maps
     # through the embedding table; "embedding" adds noise directly in the
     # d-dimensional embedding space.
@@ -68,15 +68,15 @@ class CANDISpecificConfig:
     # If False, corruption_bias is frozen (requires_grad=False).
     learn_corruption_bias: bool = field(default=False)
 
-    # Loss weighting: "candi" (ELBO-derived 1/t) or "linear" (original DPLM2)
-    loss_weight: str = field(default="candi")
+    # Loss weighting: "hybrid" (ELBO-derived 1/t) or "linear" (original DPLM2)
+    loss_weight: str = field(default="hybrid")
 
 
 @dataclass
-class DPLM2CANDIConfig(DPLM2Config):
-    candi: CANDISpecificConfig = field(default_factory=CANDISpecificConfig)
+class DPLM2HybridConfig(DPLM2Config):
+    hybrid: HybridSpecificConfig = field(default_factory=HybridSpecificConfig)
     # Whether ESM's embedding layer applies token_dropout (0.88 scaling).
-    # Set False for CANDI since we provide soft embeddings, not discrete tokens.
+    # Set False for hybrid since we provide soft embeddings, not discrete tokens.
     token_dropout: bool = field(default=False)
 
 
@@ -119,11 +119,11 @@ class TimestepEmbedding(nn.Module):
 # ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
-@register_model("dplm2_candi")
-class CANDIDiffusionProteinLanguageModel(
+@register_model("dplm2_hybrid")
+class HybridDiffusionProteinLanguageModel(
     MultimodalDiffusionProteinLanguageModel
 ):
-    _default_cfg = DPLM2CANDIConfig()
+    _default_cfg = DPLM2HybridConfig()
 
     def __init__(self, cfg, net=None):
         # Handle loading from HuggingFace DPLM2 directly
@@ -149,24 +149,24 @@ class CANDIDiffusionProteinLanguageModel(
         # Initialized from average of mask token embeddings.
         self.corruption_bias = nn.Parameter(
             torch.zeros(d_model),
-            requires_grad=self.cfg.candi.learn_corruption_bias,
+            requires_grad=self.cfg.hybrid.learn_corruption_bias,
         )
         self._init_corruption_bias()
 
         # Noise schedule
-        self.noise_schedule = CANDINoiseSchedule(
+        self.noise_schedule = HybridNoiseSchedule(
             num_timesteps=self.cfg.num_diffusion_timesteps,
-            r_min=self.cfg.candi.r_min,
-            r_max=self.cfg.candi.r_max,
-            sigma_min=self.cfg.candi.sigma_min,
-            sigma_max=self.cfg.candi.sigma_max,
+            r_min=self.cfg.hybrid.r_min,
+            r_max=self.cfg.hybrid.r_max,
+            sigma_min=self.cfg.hybrid.sigma_min,
+            sigma_max=self.cfg.hybrid.sigma_max,
         )
 
         # Lambda bias annealing state
         self._train_step = 0
 
         # Optional sigma embedding
-        if self.cfg.candi.use_sigma_embed:
+        if self.cfg.hybrid.use_sigma_embed:
             self.sigma_embedding = TimestepEmbedding(d_model)
         else:
             self.sigma_embedding = None
@@ -235,20 +235,20 @@ class CANDIDiffusionProteinLanguageModel(
 
     def get_lambda_bias(self):
         """Return current lambda_bias, accounting for annealing schedule."""
-        anneal_steps = self.cfg.candi.lambda_bias_anneal_steps
+        anneal_steps = self.cfg.hybrid.lambda_bias_anneal_steps
         if anneal_steps <= 0 or not self.training:
-            return self.cfg.candi.lambda_bias
+            return self.cfg.hybrid.lambda_bias
         progress = min(self._train_step / anneal_steps, 1.0)
-        lam_init = self.cfg.candi.lambda_bias_init
-        lam_final = self.cfg.candi.lambda_bias
+        lam_init = self.cfg.hybrid.lambda_bias_init
+        lam_final = self.cfg.hybrid.lambda_bias
         return lam_init + (lam_final - lam_init) * progress
 
     # ------------------------------------------------------------------
-    # CANDI hybrid noising
+    # Hybrid noising
     # ------------------------------------------------------------------
-    def candi_q_sample(self, x_0, t, type_ids, maskable_mask):
+    def hybrid_q_sample(self, x_0, t, type_ids, maskable_mask):
         """
-        CANDI hybrid noising: discrete masking + continuous Gaussian noise.
+        Hybrid noising: discrete masking + continuous Gaussian noise.
 
         Args:
             x_0:           [B, L] clean token indices
@@ -263,7 +263,7 @@ class CANDIDiffusionProteinLanguageModel(
         """
         B, L = x_0.shape
         device = x_0.device
-        noise_space = self.cfg.candi.noise_space
+        noise_space = self.cfg.hybrid.noise_space
 
         # 1. Discrete masking: each maskable position is corrupted with prob 1-alpha
         alpha_t = self.noise_schedule.get_alpha(t)  # [B]
@@ -376,7 +376,7 @@ class CANDIDiffusionProteinLanguageModel(
     # ------------------------------------------------------------------
     def construct_x_t(self, struct_target, aatype_target):
         """
-        Override: apply CANDI hybrid noising instead of discrete mask-only.
+        Override: apply Hybrid noising instead of discrete mask-only.
 
         Returns soft embeddings per modality (not discrete noised tokens).
         """
@@ -432,18 +432,18 @@ class CANDIDiffusionProteinLanguageModel(
         aatype_t = aatype_t.masked_fill(folding_index, 0)
         aatype_t = aatype_t.masked_scatter(joint_index, struct_t[joint_index])
 
-        # Apply CANDI noising to struct half
+        # Apply hybrid noising to struct half
         struct_type_id = self.get_modality_type(struct_target)
-        struct_soft, struct_mask, struct_sigma = self.candi_q_sample(
+        struct_soft, struct_mask, struct_sigma = self.hybrid_q_sample(
             struct_target,
             struct_t,
             struct_type_id,
             maskable_mask=self.get_non_special_symbol_mask(struct_target),
         )
 
-        # Apply CANDI noising to AA half
+        # Apply hybrid noising to AA half
         aa_type_id = self.get_modality_type(aatype_target)
-        aa_soft, aa_mask, aa_sigma = self.candi_q_sample(
+        aa_soft, aa_mask, aa_sigma = self.hybrid_q_sample(
             aatype_target,
             aatype_t,
             aa_type_id,
@@ -468,7 +468,7 @@ class CANDIDiffusionProteinLanguageModel(
 
     def compute_loss(self, batch, weighting=None):
         """
-        Override: use CANDI soft embeddings as model input and CANDI loss weighting.
+        Override: use Hybrid soft embeddings as model input and Hybrid loss weighting.
 
         The return signature matches the parent so that the existing
         StructAARDMCrossEntropyLoss criterion works unchanged.
@@ -477,7 +477,7 @@ class CANDIDiffusionProteinLanguageModel(
             self._train_step += 1
 
         if weighting is None:
-            weighting = self.cfg.candi.loss_weight
+            weighting = self.cfg.hybrid.loss_weight
 
         struct_target = batch["struct_tokens"]["targets"]
         aatype_target = batch["aatype_tokens"]["targets"]
@@ -510,8 +510,8 @@ class CANDIDiffusionProteinLanguageModel(
 
         # Loss weights
         num_ts = self.cfg.num_diffusion_timesteps
-        if weighting == "candi":
-            # CANDI ELBO weight: 1 / (1 - alpha(t)) = T / t_discrete
+        if weighting == "hybrid":
+            # Hybrid ELBO weight: 1 / (1 - alpha(t)) = T / t_discrete
             struct_w = (
                 num_ts / struct_noised["t"].float().clamp(min=1)
             )[:, None]
@@ -546,13 +546,13 @@ class CANDIDiffusionProteinLanguageModel(
     # ------------------------------------------------------------------
     # Inference: hybrid decoding (continuous ODE + discrete unmasking)
     # ------------------------------------------------------------------
-    def _init_candi_inference_state(self, output_tokens, output_masks):
-        """Initialize noisy embedding cache and clean mask for CANDI inference."""
+    def _init_hybrid_inference_state(self, output_tokens, output_masks):
+        """Initialize noisy embedding cache and clean mask for Hybrid inference."""
         B, L = output_tokens.shape
         device = output_tokens.device
         W = self._get_word_embeddings()
         d = W.shape[1]
-        noise_space = self.cfg.candi.noise_space
+        noise_space = self.cfg.hybrid.noise_space
 
         t_init = torch.tensor(
             [self.cfg.num_diffusion_timesteps], device=device
@@ -582,12 +582,12 @@ class CANDIDiffusionProteinLanguageModel(
         clean_mask = ~output_masks
         return y_cache, clean_mask
 
-    def _candi_forward_step(
+    def _hybrid_forward_step(
         self, output_tokens, y_cache, clean_mask, output_masks, sigma_curr,
         temperature, ref_input_ids=None,
     ):
         """
-        Single CANDI forward pass shared by forward_decoder and generate.
+        Single Hybrid forward pass shared by forward_decoder and generate.
 
         Constructs Y_t from clean/cached embeddings → model forward → sample.
 
@@ -702,7 +702,7 @@ class CANDIDiffusionProteinLanguageModel(
         **kwargs,
     ):
         """
-        CANDI hybrid generation loop.
+        Hybrid generation loop.
 
         At each step:
           1. Forward pass → logits → sample tokens
@@ -714,7 +714,7 @@ class CANDIDiffusionProteinLanguageModel(
         """
         self.eval()
         T = self.cfg.num_diffusion_timesteps
-        noise_space = self.cfg.candi.noise_space
+        noise_space = self.cfg.hybrid.noise_space
         device = input_tokens.device
 
         # 0. Initialize: all maskable positions → mask tokens
@@ -725,8 +725,8 @@ class CANDIDiffusionProteinLanguageModel(
             output_tokens, partial_masks=partial_masks
         )
 
-        # CANDI state
-        y_cache, clean_mask = self._init_candi_inference_state(
+        # Hybrid state
+        y_cache, clean_mask = self._init_hybrid_inference_state(
             output_tokens, output_masks
         )
         history = [output_tokens.clone()]
@@ -764,7 +764,7 @@ class CANDIDiffusionProteinLanguageModel(
 
             # 1. Forward pass → logits → sample tokens
             with torch.no_grad():
-                _tokens, _scores, net_out = self._candi_forward_step(
+                _tokens, _scores, net_out = self._hybrid_forward_step(
                     output_tokens, y_cache, clean_mask,
                     output_masks, sigma_curr, cur_temp,
                     ref_input_ids=ref_tokens,
