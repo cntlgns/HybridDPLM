@@ -166,6 +166,7 @@ logs
 logs/
 train_logs
 train_logs/
+slurm/
 data-bin/scaffolding-pdbs/*.pdb
 temp.ipynb
 # run/

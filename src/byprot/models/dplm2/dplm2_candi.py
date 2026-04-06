@@ -46,12 +46,12 @@ class CANDISpecificConfig:
     r_max: float = field(default=0.25)
 
     # Embedding-space VE-SDE schedule params
-    sigma_min: float = field(default=0.01)
-    sigma_max: float = field(default=2.0)
+    sigma_min: float = field(default=0.5)
+    sigma_max: float = field(default=5.0)
 
     # Corruption bias mixing coefficient.
     # lambda=0 → pure noisy embedding; lambda=1 → pure bias (like mask token)
-    lambda_bias: float = field(default=0.5)
+    lambda_bias: float = field(default=0.9999)
 
     # Lambda bias annealing: start from lambda_bias_init and linearly anneal
     # to lambda_bias over lambda_bias_anneal_steps training steps.
@@ -62,11 +62,11 @@ class CANDISpecificConfig:
     # Whether to add a learned sigma embedding to the input.
     # If True, a small MLP maps per-position sigma values to d-dimensional
     # vectors that are added to the embeddings (helps the model know noise level).
-    use_sigma_embed: bool = field(default=True)
+    use_sigma_embed: bool = field(default=False)
 
     # Whether to learn the corruption bias parameter.
     # If False, corruption_bias is frozen (requires_grad=False).
-    learn_corruption_bias: bool = field(default=True)
+    learn_corruption_bias: bool = field(default=False)
 
     # Loss weighting: "candi" (ELBO-derived 1/t) or "linear" (original DPLM2)
     loss_weight: str = field(default="candi")
