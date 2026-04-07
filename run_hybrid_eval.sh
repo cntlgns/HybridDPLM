@@ -38,43 +38,16 @@ EXP_NAME=$(basename "$EXP_DIR")
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$PROJECT_ROOT"
 
-# --- Local storage setup ---
+# --- Local storage for results only ---
 LOCAL_BASE="/data_large/unsynced_store/sihun/diffprotein/dplm"
 REMOTE_RESULTS="generation-results"  # relative to PROJECT_ROOT (on network storage)
 
-# Copy checkpoint and .hydra config to local storage
-# Model loading expects: {exp_dir}/.hydra/config.yaml relative to checkpoint
-# Checkpoint path: {exp_dir}/checkpoints/{ckpt}.ckpt
-LOCAL_EXP_DIR="${LOCAL_BASE}/train_logs/${EXP_NAME}"
-LOCAL_CKPT_DIR="${LOCAL_EXP_DIR}/checkpoints"
-LOCAL_CKPT_PATH="${LOCAL_CKPT_DIR}/${CKPT_BASENAME}.ckpt"
-LOCAL_HYDRA_DIR="${LOCAL_EXP_DIR}/.hydra"
-
-mkdir -p "$LOCAL_CKPT_DIR" "$LOCAL_HYDRA_DIR"
-
-# Copy .hydra/config.yaml (small; skip if already exists)
+# Verify .hydra/config.yaml exists (needed by model loading)
 ORIG_HYDRA_CFG="${EXP_DIR}/.hydra/config.yaml"
-if [ -f "$LOCAL_HYDRA_DIR/config.yaml" ]; then
-    echo "[Local] .hydra/config.yaml already exists locally"
-elif [ -f "$ORIG_HYDRA_CFG" ]; then
-    cp -f "$ORIG_HYDRA_CFG" "$LOCAL_HYDRA_DIR/config.yaml"
-    echo "[Local] Copied .hydra/config.yaml"
-else
+if [ ! -f "$ORIG_HYDRA_CFG" ]; then
     echo "Error: .hydra/config.yaml not found at $ORIG_HYDRA_CFG"
     exit 1
 fi
-
-# Copy checkpoint (skip if already exists)
-if [ -f "$LOCAL_CKPT_PATH" ]; then
-    echo "[Local] Checkpoint already exists locally: $LOCAL_CKPT_PATH"
-else
-    echo "[Local] Copying checkpoint to local storage..."
-    cp -f "$CKPT_PATH" "$LOCAL_CKPT_PATH"
-    echo "[Local] Done: $LOCAL_CKPT_PATH"
-fi
-
-# Use local checkpoint for generation
-CKPT_PATH="$LOCAL_CKPT_PATH"
 
 DATASETS=()
 if [ "$DATASET" = "all" ]; then
@@ -106,7 +79,7 @@ for DS in "${DATASETS[@]}"; do
 
     echo "=============================================="
     echo "  Dataset:   $DS"
-    echo "  Ckpt:      $CKPT_PATH (local)"
+    echo "  Ckpt:      $CKPT_PATH (shared storage)"
     echo "  Save to:   $LOCAL_SAVE_DIR/inverse_folding (local)"
     echo "  Sync to:   $REMOTE_SAVE_DIR/inverse_folding (network)"
     echo "  Sampling:  $SAMPLING"
@@ -147,8 +120,5 @@ for DS in "${DATASETS[@]}"; do
 
     echo ""
 done
-
-# NOTE: Local checkpoint/config are NOT deleted here because other jobs on the
-# same node may still need them. Use cleanup_local.sh after all jobs finish.
 
 echo "All done!"
