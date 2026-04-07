@@ -55,12 +55,8 @@ model:
     # Embedding VE-SDE schedule
     sigma_min: 0.2
     sigma_max: 2.0
-    # Corruption bias mixing: 0 = pure noisy, 1 = pure bias (like mask token)
-    lambda_bias: 0.9999
-    # Lambda bias annealing: start from lambda_bias_init, linearly anneal to
-    # lambda_bias over lambda_bias_anneal_steps steps. 0 = disabled.
-    lambda_bias_init: ${.lambda_bias}
-    lambda_bias_anneal_steps: 0
+    # Corruption bias mixing: 1 = pure noisy, 0 = pure bias (like mask token)
+    lambda_bias: 1.0
     # Whether to learn the corruption bias parameter (false = frozen at init)
     learn_corruption_bias: false
     # Add learned sigma embedding to model input

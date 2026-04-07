@@ -50,14 +50,8 @@ class HybridSpecificConfig:
     sigma_max: float = field(default=5.0)
 
     # Corruption bias mixing coefficient.
-    # lambda=0 → pure noisy embedding; lambda=1 → pure bias (like mask token)
-    lambda_bias: float = field(default=0.9999)
-
-    # Lambda bias annealing: start from lambda_bias_init and linearly anneal
-    # to lambda_bias over lambda_bias_anneal_steps training steps.
-    # Set lambda_bias_anneal_steps=0 to disable annealing (use fixed lambda_bias).
-    lambda_bias_init: float = field(default=1.0)
-    lambda_bias_anneal_steps: int = field(default=0)
+    # lambda=1 → pure noisy embedding; lambda=0 → pure bias (like mask token)
+    lambda_bias: float = field(default=1.0)
 
     # Whether to add a learned sigma embedding to the input.
     # If True, a small MLP maps per-position sigma values to d-dimensional
@@ -163,7 +157,6 @@ class HybridDiffusionProteinLanguageModel(
         )
 
         # Lambda bias annealing state
-        self._train_step = 0
 
         # Optional sigma embedding
         if self.cfg.hybrid.use_sigma_embed:
@@ -234,14 +227,8 @@ class HybridDiffusionProteinLanguageModel(
             pass  # keep zero init
 
     def get_lambda_bias(self):
-        """Return current lambda_bias, accounting for annealing schedule."""
-        anneal_steps = self.cfg.hybrid.lambda_bias_anneal_steps
-        if anneal_steps <= 0 or not self.training:
-            return self.cfg.hybrid.lambda_bias
-        progress = min(self._train_step / anneal_steps, 1.0)
-        lam_init = self.cfg.hybrid.lambda_bias_init
-        lam_final = self.cfg.hybrid.lambda_bias
-        return lam_init + (lam_final - lam_init) * progress
+        """Return fixed lambda_bias from config."""
+        return self.cfg.hybrid.lambda_bias
 
     # ------------------------------------------------------------------
     # Hybrid noising
@@ -308,7 +295,7 @@ class HybridDiffusionProteinLanguageModel(
         where eps ~ N(0, I_{|V_modality|}).
 
         Then apply preconditioning and corruption bias:
-            output = (1-lambda) * noisy_embed / sqrt(sigma^2+1) + lambda * bias
+            output = lambda * noisy_embed / sqrt(sigma^2+1) + (1-lambda) * bias
         """
         B, L, d = clean_embeds.shape
         device = clean_embeds.device
@@ -335,7 +322,7 @@ class HybridDiffusionProteinLanguageModel(
 
             noisy = soft_embeds[mod_mask] + sig * noise_emb
             c_in = 1.0 / torch.sqrt(sig**2 + 1.0)
-            corrupted = (1 - lam) * noisy * c_in + lam * self.corruption_bias
+            corrupted = lam * noisy * c_in + (1 - lam) * self.corruption_bias
             soft_embeds[mod_mask] = corrupted
 
         return soft_embeds
@@ -348,7 +335,7 @@ class HybridDiffusionProteinLanguageModel(
             noisy_embed = W[x] + sigma * eps,  eps ~ N(0, I_d)
 
         Then apply preconditioning and corruption bias:
-            output = (1-lambda) * noisy_embed / sqrt(sigma^2+1) + lambda * bias
+            output = lambda * noisy_embed / sqrt(sigma^2+1) + (1-lambda) * bias
         """
         B, L, d = clean_embeds.shape
         device = clean_embeds.device
@@ -366,7 +353,7 @@ class HybridDiffusionProteinLanguageModel(
 
         noisy = soft_embeds[mask_t] + sig * eps
         c_in = 1.0 / torch.sqrt(sig**2 + 1.0)
-        corrupted = (1 - lam) * noisy * c_in + lam * self.corruption_bias
+        corrupted = lam * noisy * c_in + (1 - lam) * self.corruption_bias
         soft_embeds[mask_t] = corrupted
 
         return soft_embeds
@@ -473,9 +460,6 @@ class HybridDiffusionProteinLanguageModel(
         The return signature matches the parent so that the existing
         StructAARDMCrossEntropyLoss criterion works unchanged.
         """
-        if self.training:
-            self._train_step += 1
-
         if weighting is None:
             weighting = self.cfg.hybrid.loss_weight
 
@@ -621,8 +605,8 @@ class HybridDiffusionProteinLanguageModel(
             lam = self.get_lambda_bias()
             c_in = 1.0 / math.sqrt(sigma_curr**2 + 1.0)
             precond = (
-                (1 - lam) * Y_t[corrupted] * c_in
-                + lam * self.corruption_bias
+                lam * Y_t[corrupted] * c_in
+                + (1 - lam) * self.corruption_bias
             )
             Y_t = Y_t.clone()
             Y_t[corrupted] = precond
