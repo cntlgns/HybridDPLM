@@ -5,13 +5,13 @@ model_checkpoint:
   _target_: byprot.utils.callbacks.ModelCheckpoint
   monitor: "val/loss" # name of the logged metric which determines when model is improving
   mode: "min" # "max" means higher metric value is better, can be also "min"
-  save_top_k: 50 # save k best models (determined by above metric)
+  save_top_k: 3 # save k best models (determined by above metric)
   save_last: True # additionaly always save model from last epoch
   verbose: True
   dirpath: ${paths.ckpt_dir}
   filename: "step_{global_step}-loss_{val/loss:.2f}"
   auto_insert_metric_name: False
-  every_n_train_steps: 1000
+  every_n_train_steps: 250
   every_n_epochs: null
 
 early_stopping:

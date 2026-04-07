@@ -164,6 +164,8 @@ class HybridDiffusionProteinLanguageModel(
         else:
             self.sigma_embedding = None
 
+        # import ipdb; ipdb.set_trace()  # check init
+
     # ------------------------------------------------------------------
     # Initialization helpers
     # ------------------------------------------------------------------
@@ -188,6 +190,11 @@ class HybridDiffusionProteinLanguageModel(
                 lora_dropout=cfg.lora.lora_dropout,
             )
             net = get_peft_model(net, peft_config)
+
+            if getattr(cfg.lora, "train_layer_norm", False):
+                for name, param in net.named_parameters():
+                    if "LayerNorm" in name:
+                        param.requires_grad = True
 
         return net
 

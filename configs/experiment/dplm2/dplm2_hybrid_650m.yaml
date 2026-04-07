@@ -27,7 +27,7 @@ datamodule:
   csv_file: pdb_swissprot
   vocab_file: airkingbd/dplm2_650m
   struct_vocab_size: 8192
-  max_tokens: 4000
+  max_tokens: 2000
   max_len: 512
 
 model:
@@ -58,9 +58,9 @@ model:
     # Corruption bias mixing: 1 = pure noisy, 0 = pure bias (like mask token)
     lambda_bias: 1.0
     # Whether to learn the corruption bias parameter (false = frozen at init)
-    learn_corruption_bias: false
+    learn_corruption_bias: true
     # Add learned sigma embedding to model input
-    use_sigma_embed: false
+    use_sigma_embed: true
     # Loss weight: "hybrid" (ELBO 1/t) or "linear" (original DPLM2)
     loss_weight: constant
   # --- ESM embedding config ---
@@ -68,10 +68,11 @@ model:
   # --- LoRA config ---
   lora:
     enable: true
-    lora_rank: 32
+    lora_rank: 64
     lora_dropout: 0.1
     lora_target_module: (esm.encoder.layer.[0-9]*.attention.(self.query|self.key|self.value|output.dense).*|esm.encoder.layer.[0-9]*.(intermediate|output).dense.*)
     modules_to_save: lm_head,esm.embeddings
+    train_layer_norm: true
   # --- Network backbone ---
   net:
     arch_type: esm
@@ -106,34 +107,34 @@ task:
     lr: ${train.lr}
     betas:
       - 0.9
-      - 0.98
+      - 0.95
     weight_decay: 0.01
   lr_scheduler:
     type: polynomial
     warmup_steps: 2000
     total_steps: ${trainer.max_steps}
     lr: ${train.lr}
-    lr_end: 1e-7
+    lr_end: 1e-5
     warmup_init_lr: 1e-07
-    power: 2
+    power: 1
 
 train:
   seed: 42
-  lr: 1e-5
+  lr: 1e-4
   monitor: "val/loss"
   mode: "min"
-  patience: 20
+  patience: 1000
 
 trainer:
   min_epochs: 5
-  max_epochs: 10
+  max_epochs: 20
   gradient_clip_val: 0.5
   num_sanity_val_steps: 1
   reload_dataloaders_every_n_epochs: 1
   use_distributed_sampler: false
   max_steps: 100_000
-  accumulate_grad_batches: 1
+  accumulate_grad_batches: 32
   check_val_every_n_epoch: null
-  val_check_interval: 250
+  val_check_interval: 800
   enable_progress_bar: true
   num_nodes: 1

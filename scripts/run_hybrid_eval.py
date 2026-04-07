@@ -21,7 +21,7 @@ PART_TO_PY = {
 }
 
 PROJECT_DIR = "/data_fast/home/sihun/diffprotein/dplm"
-SCRIPT_PATH = f"{PROJECT_DIR}/run_hybrid_eval.sh"
+SCRIPT_PATH = f"{PROJECT_DIR}/scripts/run_hybrid_eval.sh"
 RESULT_BASE = f"{PROJECT_DIR}/generation-results/hybrid_invfold_test"
 
 DATASETS = ["cameo2022", "PDB_date"] # "cameo2022", "PDB_date"
