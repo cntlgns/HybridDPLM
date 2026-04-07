@@ -67,7 +67,7 @@ We develop DPLM based on the [ByProt](https://github.com/BytedProtein/ByProt). T
   - [Sequence-conditioned Generation: Forward Folding](#sequence-conditioned-generation-forward-folding)
   - [Structure-conditioned generation: inverse folding](#structure-conditioned-generation-inverse-folding)
   - [Motif scaffolding](#motif-scaffolding)
-  - [Hybrid Diffusion (CANDI)](#hybrid-diffusion-candi)
+  - [Hybrid Diffusion](#hybrid-diffusion)
   - [Representation Learning](#representation-learning)
 - [Acknowledgements](#acknowledgements)
 - [Citation](#citation)
@@ -646,40 +646,40 @@ python src/byprot/utils/protein/evaluator_dplm2.py -cn unconditional_codesign \
 ```
 For evaluation, users can use the `analysis/motif_analysis.ipynb` to obtain success rate of each problem.
 
-## Hybrid Diffusion (CANDI)
+## Hybrid Diffusion
 
-We integrate [CANDI (Continuous ANd DIscrete diffusion)](https://arxiv.org/abs/2502.14949) into DPLM-2, enabling hybrid discrete-continuous diffusion for protein sequence-structure modeling. Unlike standard DPLM-2 which uses discrete masking only, the hybrid approach applies both **discrete masking** and **continuous Gaussian noise** to token embeddings simultaneously. This decouples identity corruption (which tokens are masked) from rank degradation (how much information the continuous embeddings retain), providing a richer noise schedule and more expressive denoising objective. During inference, each step performs a continuous ODE update followed by discrete unmasking.
+We integrate [hybrid discrete-continuous diffusion](https://arxiv.org/abs/2502.14949) into DPLM-2, enabling hybrid discrete-continuous diffusion for protein sequence-structure modeling. Unlike standard DPLM-2 which uses discrete masking only, the hybrid approach applies both **discrete masking** and **continuous Gaussian noise** to token embeddings simultaneously. This decouples identity corruption (which tokens are masked) from rank degradation (how much information the continuous embeddings retain), providing a richer noise schedule and more expressive denoising objective. During inference, each step performs a continuous ODE update followed by discrete unmasking.
 
 <!-- omit in toc -->
 ### Training
 
-Finetune DPLM-2 (650M) with hybrid CANDI noising:
+Finetune DPLM-2 (650M) with hybrid noising:
 
 ```bash
-python train.py experiment=dplm2/dplm2_candi_650m name=candi_invfold
+python train.py experiment=dplm2/dplm2_hybrid_650m name=hybrid_invfold
 ```
 
-Key configurations can be found in `configs/experiment/dplm2/dplm2_candi_650m.yaml`, including:
-- `candi.noise_space`: noise injection space (`embedding` or `onehot`)
-- `candi.sigma_min / sigma_max`: continuous noise schedule range
-- `candi.lambda_bias`: mixing between noisy embedding and bias token (0 = pure noise, 1 = pure mask-like bias)
-- `candi.loss_weight`: loss weighting strategy (`constant` or `candi` for ELBO-derived 1/t)
+Key configurations can be found in `configs/experiment/dplm2/dplm2_hybrid_650m.yaml`, including:
+- `hybrid.noise_space`: noise injection space (`embedding` or `onehot`)
+- `hybrid.sigma_min / sigma_max`: continuous noise schedule range
+- `hybrid.lambda_bias`: mixing between noisy embedding and bias token (0 = pure noise, 1 = pure mask-like bias)
+- `hybrid.loss_weight`: loss weighting strategy (`constant` or `hybrid` for ELBO-derived 1/t)
 - `lora.enable`: LoRA finetuning is enabled by default (rank 64)
 
 <!-- omit in toc -->
 ### Inference (Inverse Folding)
 
-Evaluate a trained CANDI checkpoint on inverse folding benchmarks:
+Evaluate a trained hybrid checkpoint on inverse folding benchmarks:
 
 ```bash
-bash run_candi_eval.sh <ckpt_path> [dataset] [sampling_strategy] [max_iter]
+bash run_hybrid_eval.sh <ckpt_path> [dataset] [sampling_strategy] [max_iter]
 
 # Examples:
-bash run_candi_eval.sh train_logs/candi_invfold/checkpoints/step_13999.0-loss_3.73.ckpt cameo2022
-bash run_candi_eval.sh train_logs/candi_invfold/checkpoints/step_13999.0-loss_3.73.ckpt all
+bash run_hybrid_eval.sh train_logs/hybrid_invfold/checkpoints/step_13999.0-loss_3.73.ckpt cameo2022
+bash run_hybrid_eval.sh train_logs/hybrid_invfold/checkpoints/step_13999.0-loss_3.73.ckpt all
 ```
 
-The script runs generation (`generate_dplm2_candi.py`) followed by metric evaluation. Supported datasets: `cameo2022`, `PDB_date`, or `all` (both).
+The script runs generation (`generate_dplm2_hybrid.py`) followed by metric evaluation. Supported datasets: `cameo2022`, `PDB_date`, or `all` (both).
 
 ## Representation Learning
 

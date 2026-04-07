@@ -34,9 +34,9 @@ METRIC_COLS = [
 ]
 
 STAT_FUNCS = {
-    "mean": np.mean,
     "median": np.median,
-    "std": np.std,
+    "mean": np.mean,
+    # "std": np.std,
 }
 
 
@@ -98,10 +98,10 @@ def summarize_finetune(ft_dir: str):
     print(f"Summary saved to {output_csv}")
     print(f"Found {len(rows)} checkpoint(s) across {summary_df['dataset'].nunique()} dataset(s)\n")
 
-    pd.set_option("display.max_columns", None)
-    pd.set_option("display.width", 200)
-    pd.set_option("display.max_colwidth", 30)
-    print(summary_df.to_string(index=False))
+    # pd.set_option("display.max_columns", None)
+    # pd.set_option("display.width", 200)
+    # pd.set_option("display.max_colwidth", 30)
+    # print(summary_df.to_string(index=False))
 
 
 if __name__ == "__main__":

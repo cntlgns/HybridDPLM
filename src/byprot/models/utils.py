@@ -37,6 +37,7 @@ class LoRAConfig:
     lora_dropout: float = field(default=0.1)
     lora_target_module: str = field(default="")
     modules_to_save: str = field(default="")
+    train_layer_norm: bool = field(default=False)
 
 
 def get_net_class(dplm_type):
@@ -102,6 +103,11 @@ def get_net(cfg):
             lora_dropout=cfg.lora.lora_dropout,
         )
         net = get_peft_model(net, peft_config)
+
+        if getattr(cfg.lora, "train_layer_norm", False):
+            for name, param in net.named_parameters():
+                if "LayerNorm" in name:
+                    param.requires_grad = True
 
     return net
 
@@ -203,6 +209,11 @@ def get_net_dplm2(cfg):
         )
         net = get_peft_model(net, peft_config)
 
+        if getattr(cfg.lora, "train_layer_norm", False):
+            for name, param in net.named_parameters():
+                if "LayerNorm" in name:
+                    param.requires_grad = True
+
     return net
 
 
@@ -251,6 +262,11 @@ def get_net_dplm2_bit(cfg):
         )
         net = get_peft_model(net, peft_config)
 
+        if getattr(cfg.lora, "train_layer_norm", False):
+            for name, param in net.named_parameters():
+                if "LayerNorm" in name:
+                    param.requires_grad = True
+
     return net
 
 
@@ -294,6 +310,11 @@ def get_net_dplm2_lm_heads(cfg):
             lora_dropout=cfg.lora.lora_dropout,
         )
         net = get_peft_model(net, peft_config)
+
+        if getattr(cfg.lora, "train_layer_norm", False):
+            for name, param in net.named_parameters():
+                if "LayerNorm" in name:
+                    param.requires_grad = True
 
     return net
 

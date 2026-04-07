@@ -216,12 +216,14 @@ class DPLM2TrainingTask(TaskLitModule):
 
         for log_key in logging_output:
             log_value = logging_output[log_key]
+            is_struct = log_key.startswith("struct/")
             self.log(
                 f"train/{log_key}",
                 log_value,
                 on_step=True,
                 on_epoch=False,
-                prog_bar=True,
+                prog_bar=not is_struct,
+                logger=not is_struct,
             )
 
         return {"loss": loss}
@@ -305,13 +307,13 @@ class DPLM2TrainingTask(TaskLitModule):
             on_epoch=True,
             prog_bar=True,
         )
-        self.log(
-            f"{log_key}/struct_loss",
-            eval_struct_loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-        )
+        # self.log(
+        #     f"{log_key}/struct_loss",
+        #     eval_struct_loss,
+        #     on_step=False,
+        #     on_epoch=True,
+        #     prog_bar=True,
+        # )
         self.log(
             f"{log_key}/aatype_index_accuracy",
             eval_aatype_accuracy,
@@ -319,13 +321,13 @@ class DPLM2TrainingTask(TaskLitModule):
             on_epoch=True,
             prog_bar=True,
         )
-        self.log(
-            f"{log_key}/struct_index_accuracy",
-            eval_struct_accuracy,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-        )
+        # self.log(
+        #     f"{log_key}/struct_index_accuracy",
+        #     eval_struct_accuracy,
+        #     on_step=False,
+        #     on_epoch=True,
+        #     prog_bar=True,
+        # )
 
         if self.stage == "fit":
             self.val_ppl_best.update(eval_ppl)

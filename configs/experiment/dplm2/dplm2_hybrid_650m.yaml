@@ -1,37 +1,37 @@
 # @package _global_
 
-# DPLM2 + CANDI hybrid discrete-continuous diffusion finetuning
+# DPLM2 + Hybrid hybrid discrete-continuous diffusion finetuning
 #
-# This config finetunes DPLM2-650M with CANDI's hybrid noising:
+# This config finetunes DPLM2-650M with Hybrid's hybrid noising:
 #   - Discrete masking (same as DPLM2) + Continuous Gaussian noise
 #   - Decouples discrete identity corruption from continuous rank degradation
 #
 # Usage:
-#   python train.py experiment=dplm2/dplm2_candi_650m
+#   python train.py experiment=dplm2/dplm2_hybrid_650m
 #
 # To finetune from a pre-trained DPLM2 checkpoint instead of DPLM:
 #   1. Set training_stage to "finetune_from_dplm2_hf"
 #   2. Set net.pretrained_model_name_or_path to "airkingbd/dplm2_650m"
-#   3. Set net.pretrain to false (loading handled by CANDI class)
+#   3. Set net.pretrain to false (loading handled by Hybrid class)
 
 defaults:
   - /datamodule: tokenized_protein
   - /callbacks: lm
   - /trainer: ddp_bf16
 
-project: "DPLM2_CANDI_650m"
-name: "dplm2_candi_650m"
+project: "DPLM2_Hybrid_650m"
+name: "dplm2_hybrid_650m"
 
 datamodule:
   data_dir: ${paths.data_dir}
   csv_file: pdb_swissprot
   vocab_file: airkingbd/dplm2_650m
   struct_vocab_size: 8192
-  max_tokens: 4000
+  max_tokens: 2000
   max_len: 512
 
 model:
-  _target_: dplm2_candi
+  _target_: dplm2_hybrid
   num_diffusion_timesteps: 500
   gradient_ckpt: false
   # --- Training stage ---
@@ -39,13 +39,13 @@ model:
   # "finetune_from_dplm2_hf": start from HuggingFace DPLM2 (struct tokens already trained)
   training_stage: finetune_from_dplm2_hf
   # --- Multi-task ratios ---
-  single_modality_ratio: 0.05
-  folding_loss_ratio: 0.1
-  inverse_folding_loss_ratio: 0.7
-  joint_loss_ratio: 0.15
+  single_modality_ratio: 0.0
+  folding_loss_ratio: 0.0
+  inverse_folding_loss_ratio: 1.0
+  joint_loss_ratio: 0.0
   independent_loss_ratio: 0.0
-  # --- CANDI-specific config ---
-  candi:
+  # --- Hybrid-specific config ---
+  hybrid:
     # "embedding": add noise in d-dim embedding space (memory efficient)
     # "onehot": add noise in one-hot space then map through W (principled but heavier)
     noise_space: embedding
@@ -53,13 +53,15 @@ model:
     r_min: 0.01
     r_max: 0.25
     # Embedding VE-SDE schedule
-    sigma_min: 0.5
-    sigma_max: 10.0
-    # Corruption bias mixing: 0 = pure noisy, 1 = pure bias (like mask token)
-    lambda_bias: 0.5
+    sigma_min: 0.2
+    sigma_max: 2.0
+    # Corruption bias mixing: 1 = pure noisy, 0 = pure bias (like mask token)
+    lambda_bias: 1.0
+    # Whether to learn the corruption bias parameter (false = frozen at init)
+    learn_corruption_bias: true
     # Add learned sigma embedding to model input
     use_sigma_embed: true
-    # Loss weight: "candi" (ELBO 1/t) or "linear" (original DPLM2)
+    # Loss weight: "hybrid" (ELBO 1/t) or "linear" (original DPLM2)
     loss_weight: constant
   # --- ESM embedding config ---
   token_dropout: false
@@ -70,6 +72,7 @@ model:
     lora_dropout: 0.1
     lora_target_module: (esm.encoder.layer.[0-9]*.attention.(self.query|self.key|self.value|output.dense).*|esm.encoder.layer.[0-9]*.(intermediate|output).dense.*)
     modules_to_save: lm_head,esm.embeddings
+    train_layer_norm: true
   # --- Network backbone ---
   net:
     arch_type: esm
@@ -77,7 +80,7 @@ model:
     dropout: 0.1
     pretrain: false
     pretrained_model_name_or_path: airkingbd/dplm2_650m
-  # --- Self-mixup (disabled for CANDI) ---
+  # --- Self-mixup (disabled for Hybrid) ---
   self_mixup:
     enable: false
     with_original_loss: false
@@ -92,7 +95,7 @@ task:
   learning:
     watch_t1_t2_loss: false
     cal_constant_loss: true
-    # Use CANDI loss weighting (passed to model.compute_loss)
+    # Use Hybrid loss weighting (passed to model.compute_loss)
     weight: constant
   criterion:
     _target_: byprot.modules.cross_entropy.StructAARDMCrossEntropyLoss
@@ -104,7 +107,7 @@ task:
     lr: ${train.lr}
     betas:
       - 0.9
-      - 0.98
+      - 0.95
     weight_decay: 0.01
   lr_scheduler:
     type: polynomial
@@ -117,10 +120,10 @@ task:
 
 train:
   seed: 42
-  lr: 3e-5
+  lr: 1e-4
   monitor: "val/loss"
   mode: "min"
-  patience: 5
+  patience: 1000
 
 trainer:
   min_epochs: 5
@@ -130,8 +133,8 @@ trainer:
   reload_dataloaders_every_n_epochs: 1
   use_distributed_sampler: false
   max_steps: 100_000
-  accumulate_grad_batches: 1
+  accumulate_grad_batches: 32
   check_val_every_n_epoch: null
-  val_check_interval: 500
+  val_check_interval: 800
   enable_progress_bar: true
   num_nodes: 1

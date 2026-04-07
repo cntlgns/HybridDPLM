@@ -1,7 +1,7 @@
-# CANDI noise schedule for hybrid discrete-continuous diffusion.
+# Hybrid noise schedule for hybrid discrete-continuous diffusion.
 #
 # Implements the noise schedule from:
-#   CANDI: Continuous And Discrete Diffusion (Pynadath et al., 2025)
+#   Hybrid: Continuous And Discrete Diffusion (Pynadath et al., 2025)
 #
 # Key idea: decouple discrete masking (alpha) from continuous Gaussian noise (sigma)
 # to avoid temporal dissonance between discrete identity corruption and
@@ -12,9 +12,9 @@ import math
 import torch
 
 
-class CANDINoiseSchedule:
+class HybridNoiseSchedule:
     """
-    Noise schedule for CANDI hybrid diffusion.
+    Noise schedule for hybrid diffusion.
 
     Manages both:
     - Discrete masking rate: alpha(t) = 1 - t/T  (log-linear schedule)

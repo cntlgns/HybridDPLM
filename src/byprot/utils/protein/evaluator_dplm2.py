@@ -498,8 +498,9 @@ class EvalRunner:
             for i, (header, aa_seq) in enumerate(fasta_seqs.items())
         ]
 
-        output_dir = fasta_path.replace(".fasta", "/seq_pred")
-        os.makedirs(output_dir, exist_ok=True)
+        # [SKIP] unnecessary file generation for metric evaluation
+        # output_dir = fasta_path.replace(".fasta", "/seq_pred")
+        # os.makedirs(output_dir, exist_ok=True)
 
         # read predicted structure pdbs
         for header, aa_seq in all_header_seqs:
@@ -520,13 +521,14 @@ class EvalRunner:
                 np.array(du.seq_to_aatype(aa_seq))
             )
 
-            saveto = os.path.join(output_dir, f"{pdb_name}.pdb")
-            log.info(f"Saving {pdb_name} to {saveto}")
-            eu.write_prot_to_pdb(
-                prot_pos=feats["all_atom_positions_gt"].cpu().detach().numpy(),
-                file_path=saveto,
-                aatype=feats["aatype"].cpu().detach().numpy(),
-            )
+            # [SKIP] unnecessary file generation for metric evaluation
+            # saveto = os.path.join(output_dir, f"{pdb_name}.pdb")
+            # log.info(f"Saving {pdb_name} to {saveto}")
+            # eu.write_prot_to_pdb(
+            #     prot_pos=feats["all_atom_positions_gt"].cpu().detach().numpy(),
+            #     file_path=saveto,
+            #     aatype=feats["aatype"].cpu().detach().numpy(),
+            # )
 
             all_data.append(feats)
             # batch_true.append(true_feats)
@@ -682,22 +684,23 @@ class EvalRunner:
 
             for i, sample_dir in enumerate(sample_dirs):
                 os.makedirs(sample_dir, exist_ok=True)
-                # save the ground truth as a pdb
-                eu.write_prot_to_pdb(
-                    prot_pos=true_bb_pos[i].cpu().detach().numpy(),
-                    file_path=os.path.join(
-                        sample_dirs[i], batch["pdb_name"][i] + "_gt.pdb"
-                    ),
-                    aatype=batch["aatype_gt"][i].cpu().detach().numpy(),
-                )
-                # save predicted sequence with gt backbone as a pdb
-                eu.write_prot_to_pdb(
-                    prot_pos=true_bb_pos[i].cpu().detach().numpy(),
-                    file_path=os.path.join(
-                        sample_dirs[i], batch["pdb_name"][i] + ".pdb"
-                    ),
-                    aatype=batch["aatype"][i].cpu().detach().numpy(),
-                )
+                # [SKIP] unnecessary file generation for metric evaluation
+                # # save the ground truth as a pdb
+                # eu.write_prot_to_pdb(
+                #     prot_pos=true_bb_pos[i].cpu().detach().numpy(),
+                #     file_path=os.path.join(
+                #         sample_dirs[i], batch["pdb_name"][i] + "_gt.pdb"
+                #     ),
+                #     aatype=batch["aatype_gt"][i].cpu().detach().numpy(),
+                # )
+                # # save predicted sequence with gt backbone as a pdb
+                # eu.write_prot_to_pdb(
+                #     prot_pos=true_bb_pos[i].cpu().detach().numpy(),
+                #     file_path=os.path.join(
+                #         sample_dirs[i], batch["pdb_name"][i] + ".pdb"
+                #     ),
+                #     aatype=batch["aatype"][i].cpu().detach().numpy(),
+                # )
             true_bb_pos = true_bb_pos[..., :3, :].reshape(-1, 3).cpu().numpy()
             assert true_bb_pos.shape == (sample_length * 3, 3)
             true_aatype = batch["aatype_gt"]
@@ -916,9 +919,10 @@ class EvalRunner:
                 pmpnn_results = eu.process_folded_outputs(
                     pdb_path, pmpnn_folded_output, true_bb_pos
                 )
-                pmpnn_results.to_csv(
-                    os.path.join(sample_dir, "pmpnn_results.csv")
-                )
+                # [SKIP] unnecessary file generation for metric evaluation
+                # pmpnn_results.to_csv(
+                #     os.path.join(sample_dir, "pmpnn_results.csv")
+                # )
 
         else:
             # non-codesign metrics (unconditional, inverse folding)
@@ -939,17 +943,18 @@ class EvalRunner:
         if true_aa is not None:
             assert true_aa.shape == (1, sample_length)
 
-            true_aa_fasta = fasta.FastaFile()
-            true_aa_fasta["seq_1"] = "".join(
-                [restypes_with_x[i] for i in true_aa[0]]
-            )
-            true_aa_fasta.write(os.path.join(sample_dir, "true_aa.fa"))
+            # [SKIP] unnecessary file generation for metric evaluation
+            # true_aa_fasta = fasta.FastaFile()
+            # true_aa_fasta["seq_1"] = "".join(
+            #     [restypes_with_x[i] for i in true_aa[0]]
+            # )
+            # true_aa_fasta.write(os.path.join(sample_dir, "true_aa.fa"))
 
-            sample_aa_fasta = fasta.FastaFile()
-            sample_aa_fasta["seq_1"] = "".join(
-                [restypes_with_x[i] for i in aa_traj[-1]]
-            )
-            sample_aa_fasta.write(os.path.join(sample_dir, "sample_aa.fa"))
+            # sample_aa_fasta = fasta.FastaFile()
+            # sample_aa_fasta["seq_1"] = "".join(
+            #     [restypes_with_x[i] for i in aa_traj[-1]]
+            # )
+            # sample_aa_fasta.write(os.path.join(sample_dir, "sample_aa.fa"))
 
             seq_recovery = (
                 (
@@ -972,17 +977,18 @@ class EvalRunner:
                     (pmpnn_fasta_idx == true_aa[0]).float().mean()
                 )
                 pmpnn_results["pmpnn_seq_recovery"] = pmpnn_seq_recovery.item()
-                pmpnn_results.to_csv(
-                    os.path.join(sample_dir, "pmpnn_results.csv")
-                )
+                # [SKIP] unnecessary file generation for metric evaluation
+                # pmpnn_results.to_csv(
+                #     os.path.join(sample_dir, "pmpnn_results.csv")
+                # )
                 mpnn_results["pmpnn_seq_recovery"] = pmpnn_seq_recovery.item()
                 mpnn_results["pmpnn_bb_rmsd"] = pmpnn_results["bb_rmsd"]
             else:
                 mpnn_results["pmpnn_seq_recovery"] = 0.0
                 mpnn_results["pmpnn_bb_rmsd"] = 0.0
 
-        # Save results to CSV
-        mpnn_results.to_csv(os.path.join(sample_dir, "sc_results.csv"))
+        # [SKIP] unnecessary file generation for metric evaluation
+        # mpnn_results.to_csv(os.path.join(sample_dir, "sc_results.csv"))
         mpnn_results["length"] = sample_length
         mpnn_results["sample_id"] = sample_id
         del mpnn_results["header"]
@@ -1111,6 +1117,21 @@ class EvalRunner:
         metrics_csv_path = os.path.join(output_dir, "inverse_fold_metrics.csv")
         metrics_df.to_csv(metrics_csv_path, index=False)
 
+        # eval 완료 후 중간 파일 정리 (all_top_samples.csv, inverse_fold_metrics.csv만 보존)
+        self._cleanup_eval_intermediates(output_dir)
+
+    def _cleanup_eval_intermediates(self, output_dir):
+        """eval 디렉토리 내 중간 산출물 삭제. all_top_samples.csv, inverse_fold_metrics.csv만 보존."""
+        keep_files = {"all_top_samples.csv", "inverse_fold_metrics.csv"}
+        for entry in os.listdir(output_dir):
+            entry_path = os.path.join(output_dir, entry)
+            if os.path.isdir(entry_path):
+                shutil.rmtree(entry_path)
+                log.info(f"[CLEANUP] 삭제: {entry_path}")
+            elif entry not in keep_files:
+                os.remove(entry_path)
+                log.info(f"[CLEANUP] 삭제: {entry_path}")
+
 
 config_path = "../../../../configs/experiment/structok/inference"
 
@@ -1192,6 +1213,11 @@ def run(cfg: DictConfig) -> None:
                     fasta_path, inplace_save=True
                 )
                 compute_metrics(eval_folder)
+                # [Remove] remove unnecessary eval intermediates after completion
+                if os.path.isdir(pdb_folder):
+                    shutil.rmtree(pdb_folder)
+                    # log.info(f"[CLEANUP] Remove: {pdb_folder}")
+                log.info(f"Removed intermediate PDB folder: {pdb_folder}")
 
     elapsed_time = time.time() - start_time
     log.info(f"Finished in {elapsed_time:.2f}s")
