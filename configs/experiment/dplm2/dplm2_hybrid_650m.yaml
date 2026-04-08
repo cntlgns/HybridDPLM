@@ -19,7 +19,7 @@ defaults:
   - /callbacks: lm
   - /trainer: ddp_bf16
 
-project: "DPLM2_Hybrid_650m"
+project: "DPLM2_Hybrid_650m_FT1_test"
 name: "dplm2_hybrid_650m"
 
 datamodule:
@@ -58,13 +58,14 @@ model:
     # Corruption bias mixing: 1 = pure noisy, 0 = pure bias (like mask token)
     lambda_bias: 1.0
     # Whether to learn the corruption bias parameter (false = frozen at init)
-    learn_corruption_bias: true
+    learn_corruption_bias: false
     # Add learned sigma embedding to model input
-    use_sigma_embed: true
+    use_sigma_embed: false
     # Loss weight: "hybrid" (ELBO 1/t) or "linear" (original DPLM2)
     loss_weight: constant
   # --- ESM embedding config ---
   token_dropout: false
+  cutoff_layer0_attn_residual: true # if set to true, lambda_bias won't matter the result
   # --- LoRA config ---
   lora:
     enable: true
@@ -135,6 +136,6 @@ trainer:
   max_steps: 100_000
   accumulate_grad_batches: 32
   check_val_every_n_epoch: null
-  val_check_interval: 800
+  val_check_interval: 1600
   enable_progress_bar: true
   num_nodes: 1

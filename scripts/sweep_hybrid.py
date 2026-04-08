@@ -36,10 +36,10 @@ NOISE_SCHEDULE_CONFIG = {
 # (enable, rank, train_layer_norm, tag)
 LORA_CONFIGS = [
     (True,  16, False, "16"),
-    # (True,  16, True,  "16ln"),
-    # (True,  64, False, "64"),
-    # (True,  64, True,  "64ln"),
-    # (False, None, None, "full"),
+    (True,  16, True,  "16ln"),
+    (True,  64, False, "64"),
+    (True,  64, True,  "64ln"),
+    (False, None, None, "full"),
 ]
 
 # (warmup_init_lr, lr, lr_end, warmup_steps, max_steps, tag)
@@ -135,7 +135,7 @@ def main():
             base_cmd="python",
             param_dict={"": lora_cmds},
             partition="rtx3090",
-            exclude="radish", #"kiwi,lemon,mango,nutella,peach,quiznos,radish,tomato,udon,watermelon,xoi,yogurt,vanilla",
+            # exclude="", #"kiwi,lemon,mango,nutella,peach,quiznos,radish,tomato,udon,watermelon,xoi,yogurt,vanilla",
             qos="normal",
             timeout="5-0",
             job_name="hybridft",

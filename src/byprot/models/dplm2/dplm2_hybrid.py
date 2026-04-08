@@ -72,6 +72,34 @@ class DPLM2HybridConfig(DPLM2Config):
     # Whether ESM's embedding layer applies token_dropout (0.88 scaling).
     # Set False for hybrid since we provide soft embeddings, not discrete tokens.
     token_dropout: bool = field(default=False)
+    # Cut residual connection in layer[0] attention for masked positions only.
+    cutoff_layer0_attn_residual: bool = field(default=False)
+
+
+# ---------------------------------------------------------------------------
+# Masked residual module for layer-0 attention
+# ---------------------------------------------------------------------------
+class MaskedResidualSelfOutput(nn.Module):
+    """Drop-in replacement for EsmSelfOutput that skips residual for masked positions."""
+
+    def __init__(self, original_output):
+        super().__init__()
+        self.dense = original_output.dense
+        self.dropout = original_output.dropout
+        self._residual_mask = None  # [B, L] bool, True = masked (no residual)
+
+    def set_residual_mask(self, mask):
+        self._residual_mask = mask
+
+    def forward(self, hidden_states, input_tensor):
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        if self._residual_mask is not None:
+            scale = (~self._residual_mask).unsqueeze(-1).float()
+            hidden_states = hidden_states + input_tensor * scale
+        else:
+            hidden_states = hidden_states + input_tensor
+        return hidden_states
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +192,11 @@ class HybridDiffusionProteinLanguageModel(
         else:
             self.sigma_embedding = None
 
+        # Replace layer[0] attention output with masked-residual version
+        if self.cfg.cutoff_layer0_attn_residual:
+            layer0_attn = self._get_layer0_attention()
+            layer0_attn.output = MaskedResidualSelfOutput(layer0_attn.output)
+
         # import ipdb; ipdb.set_trace()  # check init
 
     # ------------------------------------------------------------------
@@ -232,6 +265,13 @@ class HybridDiffusionProteinLanguageModel(
                 self.corruption_bias.zero_()  # zero init for aligning dplm2
         except Exception:
             pass  # keep zero init
+
+    def _get_layer0_attention(self):
+        """Get layer[0].attention, handling PEFT wrapping."""
+        try:
+            return self.net.base_model.model.esm.encoder.layer[0].attention
+        except AttributeError:
+            return self.net.esm.encoder.layer[0].attention
 
     def get_lambda_bias(self):
         """Return fixed lambda_bias from config."""
@@ -488,6 +528,13 @@ class HybridDiffusionProteinLanguageModel(
         # Reference input_ids for type_ids / attention computation
         ref_input_ids = torch.cat([struct_target, aatype_target], dim=1)
 
+        # Set mask for layer-0 attention residual cutoff
+        if self.cfg.cutoff_layer0_attn_residual:
+            combined_mask = torch.cat(
+                [struct_noised["mask"], aatype_noised["mask"]], dim=1
+            )
+            self._get_layer0_attention().output.set_residual_mask(combined_mask)
+
         # Forward pass with soft embeddings
         model_outputs = self.forward(
             input_ids=ref_input_ids,
@@ -626,6 +673,11 @@ class HybridDiffusionProteinLanguageModel(
                 torch.full((B, L), sigma_curr, device=device),
             )
             Y_t = Y_t + self.sigma_embedding(sigma_per_pos)
+
+        # Set mask for layer-0 attention residual cutoff
+        if self.cfg.cutoff_layer0_attn_residual:
+            corrupted_mask = ~clean_mask & output_masks
+            self._get_layer0_attention().output.set_residual_mask(corrupted_mask)
 
         # 2. Forward pass — use ref_input_ids (mask-free) so that ESM's
         #    token_dropout applies the 0.88 scaling without zeroing positions.
