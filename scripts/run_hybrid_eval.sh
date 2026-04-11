@@ -2,9 +2,9 @@
 # Usage: bash run_hybrid_eval.sh <ckpt_path> [dataset] [sampling_strategy] [max_iter]
 #
 # Example:
-#   bash run_hybrid_eval.sh train_logs/candi_const_weight_ft/checkpoints/step_63999.0-loss_0.00.ckpt
-#   bash run_hybrid_eval.sh train_logs/candi_const_weight_ft/checkpoints/step_63999.0-loss_0.00.ckpt cameo2022
-#   bash run_hybrid_eval.sh train_logs/candi_const_weight_ft/checkpoints/step_63999.0-loss_0.00.ckpt all "annealing@2.0:0.1" 50
+#   bash scripts/run_hybrid_eval.sh train_logs/candi_const_weight_ft/checkpoints/step_63999.0-loss_0.00.ckpt
+#   bash scripts/run_hybrid_eval.sh train_logs/candi_const_weight_ft/checkpoints/step_63999.0-loss_0.00.ckpt cameo2022
+#   bash scripts/run_hybrid_eval.sh train_logs/candi_const_weight_ft/checkpoints/step_63999.0-loss_0.00.ckpt all "annealing@2.0:0.1" 50
 
 set -e
 
