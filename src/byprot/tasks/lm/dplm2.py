@@ -46,6 +46,7 @@ class DPLM2TrainingTask(TaskLitModule):
             watch_t1_t2_loss=False,
             cal_constant_loss=False,
             weight="constant",
+            validation_max_iter=50,
         ),
     )
 
@@ -108,6 +109,9 @@ class DPLM2TrainingTask(TaskLitModule):
         self.eval_aatype_loss = MeanMetric()
         self.eval_struct_acc = MeanMetric()
         self.eval_aatype_acc = MeanMetric()
+
+        # Inference-based sequence recovery
+        self.eval_seq_recovery = MeanMetric()
 
     def load_from_ckpt(self, ckpt_path, not_load=False):
         # do not load state dict from ckpt, just use the initialized parameters.
@@ -257,7 +261,63 @@ class DPLM2TrainingTask(TaskLitModule):
             logging_output["struct/index_accuracy"], weight=sample_size
         )
 
+        # --- Inference-based sequence recovery (inverse folding) ---
+        seq_recovery = self._compute_inference_seq_recovery(batch)
+        if seq_recovery is not None:
+            bsz = batch["aatype_tokens"]["targets"].size(0)
+            self.eval_seq_recovery.update(seq_recovery, weight=bsz)
+
         return {"loss": loss}
+
+    @torch.no_grad()
+    def _compute_inference_seq_recovery(self, batch):
+        """Run full inference (iterative denoising) on the batch and compute
+        amino acid sequence recovery against ground truth."""
+        model = self.model
+        max_iter = self.hparams.learning.get("validation_max_iter", 50)
+
+        struct_target = batch["struct_tokens"]["targets"]  # [B, L]
+        aatype_target = batch["aatype_tokens"]["targets"]  # [B, L]
+
+        # Build input_tokens: [struct, aa] concatenated along seq dim
+        # For inverse folding: struct is given, aa is fully masked
+        input_tokens = torch.cat([struct_target, aatype_target], dim=1)
+
+        type_ids = model.get_modality_type(input_tokens)
+        non_special = model.get_non_special_symbol_mask(input_tokens)
+        aa_positions = (type_ids == model.aa_type) & non_special
+
+        # Mask all AA positions
+        input_tokens = input_tokens.clone()
+        input_tokens[aa_positions] = model.aa_mask_id
+
+        # partial_masks: struct positions (should NOT be re-masked during decoding)
+        partial_masks = type_ids == model.struct_type
+
+        # Run iterative denoising
+        was_training = model.training
+        outputs = model.generate(
+            input_tokens=input_tokens,
+            max_iter=max_iter,
+            temperature=1.0,
+            partial_masks=partial_masks,
+            sampling_strategy="annealing@2.0:0.1",
+        )
+        if was_training:
+            model.train()
+
+        # Extract predicted AA tokens
+        output_tokens = outputs["output_tokens"]
+        _, pred_aa = output_tokens.chunk(2, dim=1)
+
+        # Compute recovery: match predicted vs ground truth on non-special AA positions
+        aa_non_special = model.get_non_special_symbol_mask(aatype_target)
+        correct = (pred_aa == aatype_target) & aa_non_special
+        total = aa_non_special.sum()
+        if total == 0:
+            return None
+        recovery = correct.sum().float() / total.float()
+        return recovery
 
     def on_validation_epoch_end(self):
         log_key = "test" if self.stage == "test" else "val"
@@ -328,6 +388,17 @@ class DPLM2TrainingTask(TaskLitModule):
         #     on_epoch=True,
         #     prog_bar=True,
         # )
+
+        # Inference-based sequence recovery
+        eval_seq_recovery = self.eval_seq_recovery.compute()
+        self.eval_seq_recovery.reset()
+        self.log(
+            f"{log_key}/seq_recovery",
+            eval_seq_recovery,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+        )
 
         if self.stage == "fit":
             self.val_ppl_best.update(eval_ppl)

@@ -98,6 +98,8 @@ task:
     cal_constant_loss: true
     # Use Hybrid loss weighting (passed to model.compute_loss)
     weight: constant
+    # Number of denoising steps for inference-based validation (seq recovery)
+    validation_max_iter: 50
   criterion:
     _target_: byprot.modules.cross_entropy.StructAARDMCrossEntropyLoss
     label_smoothing: 0.0
@@ -136,6 +138,6 @@ trainer:
   max_steps: 100_000
   accumulate_grad_batches: 32
   check_val_every_n_epoch: null
-  val_check_interval: 8000
+  val_check_interval: 256
   enable_progress_bar: true
   num_nodes: 1
