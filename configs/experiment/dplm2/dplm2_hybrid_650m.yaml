@@ -19,7 +19,7 @@ defaults:
   - /callbacks: lm
   - /trainer: ddp_bf16
 
-project: "DPLM2_Hybrid_650m_FT1_test"
+project: "DPLM2_Hybrid_650m_FT1_0408"
 name: "dplm2_hybrid_650m"
 
 datamodule:
@@ -69,7 +69,7 @@ model:
   # --- LoRA config ---
   lora:
     enable: true
-    lora_rank: 64
+    lora_rank: 16
     lora_dropout: 0.1
     lora_target_module: (esm.encoder.layer.[0-9]*.attention.(self.query|self.key|self.value|output.dense).*|esm.encoder.layer.[0-9]*.(intermediate|output).dense.*)
     modules_to_save: lm_head,esm.embeddings
@@ -136,6 +136,6 @@ trainer:
   max_steps: 100_000
   accumulate_grad_batches: 32
   check_val_every_n_epoch: null
-  val_check_interval: 1600
+  val_check_interval: 8000
   enable_progress_bar: true
   num_nodes: 1

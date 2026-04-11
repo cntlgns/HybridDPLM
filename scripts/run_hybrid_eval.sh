@@ -35,7 +35,7 @@ CKPT_DIR=$(dirname "$CKPT_PATH")
 EXP_DIR=$(dirname "$CKPT_DIR")
 EXP_NAME=$(basename "$EXP_DIR")
 
-PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 # --- Local storage for results only ---
@@ -59,9 +59,9 @@ fi
 for DS in "${DATASETS[@]}"; do
     INPUT_FASTA="data-bin/${DS}/struct.fasta"
     # Save results to local storage
-    LOCAL_SAVE_DIR="${LOCAL_BASE}/generation-results/hybrid_invfold_test/${EXP_NAME}/${DS}/${CKPT_BASENAME}"
+    LOCAL_SAVE_DIR="${LOCAL_BASE}/generation-results/hybrid_invfold_test/divby30_right/${EXP_NAME}/${DS}/${CKPT_BASENAME}"
     # Corresponding remote path for rsync target
-    REMOTE_SAVE_DIR="${REMOTE_RESULTS}/hybrid_invfold_test/${EXP_NAME}/${DS}/${CKPT_BASENAME}"
+    REMOTE_SAVE_DIR="${REMOTE_RESULTS}/hybrid_invfold_test/divby30_right/${EXP_NAME}/${DS}/${CKPT_BASENAME}"
 
     # Select metadata csv and data_dir matching the dataset
     if [ "$DS" = "PDB_date" ]; then

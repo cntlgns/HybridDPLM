@@ -393,7 +393,7 @@ class HybridDiffusionProteinLanguageModel(
             return soft_embeds
 
         n = mask_t.sum().item()
-        eps = torch.randn(n, d, device=device, dtype=clean_embeds.dtype)
+        eps = torch.randn(n, d, device=device, dtype=clean_embeds.dtype) # / 12 ###### sihun : scale down noise for embedding space
 
         batch_idx = mask_t.nonzero(as_tuple=True)[0]
         sig = sigma[batch_idx].unsqueeze(-1)  # [n, 1]
@@ -615,8 +615,8 @@ class HybridDiffusionProteinLanguageModel(
         else:
             y_cache = sigma_init * torch.randn(
                 B, L, d, device=device, dtype=W.dtype
-            )
-
+            ) / 30  ###### sihun: scale down noise for embedding space / case we are trained by (sigma_min, sigma_max) =(0.5, 5.0) and want to scale noise down for inference by 1/12
+ 
         clean_mask = ~output_masks
         return y_cache, clean_mask
 
@@ -847,8 +847,9 @@ class HybridDiffusionProteinLanguageModel(
             if still_corrupted.any() and sigma_curr > 0 and sigma_next > 0:
                 W = self._get_word_embeddings()
                 E_Y0 = W[_tokens]
-                score = -(y_cache - E_Y0) / (sigma_curr**2)
+                score = (y_cache - E_Y0) / (sigma_curr**2)
                 dt = 0.5 * (sigma_curr**2 - sigma_next**2)
+                # dt = 0.5 * (sigma_curr - sigma_next)
                 y_cache = y_cache - dt * score
 
             history.append(output_tokens.clone())
