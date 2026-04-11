@@ -127,6 +127,9 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
             self.aa_U_id,
             self.aa_Z_id,
             self.aa_O_id,
+            self.garbage_dot_id,
+            self.garbage_hyphen_id,
+            self.garbage_null_id,
         ]
 
     @classmethod
@@ -210,6 +213,10 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
         self.aa_type = 1
         self.struct_type = 0
         self.pad_type = 2
+
+        self.garbage_dot_id = self.tokenizer._token_to_id["."]
+        self.garbage_hyphen_id = self.tokenizer._token_to_id["-"]
+        self.garbage_null_id = self.tokenizer._token_to_id["<null_1>"]
 
     @property
     def device(self):

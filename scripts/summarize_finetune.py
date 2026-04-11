@@ -7,7 +7,7 @@ It discovers all `all_top_samples.csv` files under {dataset}/{checkpoint}/
 and produces a summary CSV sorted by dataset and checkpoint step.
 
 Usage:
-    python summarize_finetune.py \
+    python scripts/summarize_finetune.py \
         generation-results/candi_invfold_test/candi_const_weight_ft2
 """
 

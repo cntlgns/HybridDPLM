@@ -1121,16 +1121,17 @@ class EvalRunner:
         self._cleanup_eval_intermediates(output_dir)
 
     def _cleanup_eval_intermediates(self, output_dir):
-        """eval 디렉토리 내 중간 산출물 삭제. all_top_samples.csv, inverse_fold_metrics.csv만 보존."""
+        """clean intermediate files. Delete except all_top_samples.csv, inverse_fold_metrics.csv"""
         keep_files = {"all_top_samples.csv", "inverse_fold_metrics.csv"}
         for entry in os.listdir(output_dir):
             entry_path = os.path.join(output_dir, entry)
             if os.path.isdir(entry_path):
                 shutil.rmtree(entry_path)
-                log.info(f"[CLEANUP] 삭제: {entry_path}")
+                # log.info(f"[CLEANUP] 삭제: {entry_path}")
             elif entry not in keep_files:
                 os.remove(entry_path)
-                log.info(f"[CLEANUP] 삭제: {entry_path}")
+                # log.info(f"[CLEANUP] 삭제: {entry_path}")
+        log.info(f"[CLEANUP] Cleaned up intermediate files in {output_dir}, kept {keep_files}")
 
 
 config_path = "../../../../configs/experiment/structok/inference"
