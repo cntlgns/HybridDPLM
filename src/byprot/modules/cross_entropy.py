@@ -252,6 +252,7 @@ class StructAARDMCrossEntropyLoss(nn.CrossEntropyLoss):
         weights_dict=None,
         cal_constant_loss=False,
         watch_t1_t2_loss=False,
+        fullseq_loss_weight=0.0,
     ) -> Tensor:
         """
         scores: [N, L, C], unnormalized scores
@@ -341,16 +342,19 @@ class StructAARDMCrossEntropyLoss(nn.CrossEntropyLoss):
                 logging_output[f"{key}weight_diff_t1_loss"] = t1_loss.data
                 logging_output[f"{key}weight_diff_t2_loss"] = t2_loss.data
 
-            return loss, nll_loss, logging_output
+            return loss, nll_loss, fullseq_loss, logging_output
 
         if type(scores_dict) is not dict:
-            loss, nll_loss, logging_output = compute(
+            loss, nll_loss, fullseq_loss, logging_output = compute(
                 scores_dict, target_dict, label_mask_dict, weights_dict
             )
+            if fullseq_loss_weight > 0:
+                loss = loss + fullseq_loss_weight * fullseq_loss
             return loss, logging_output
         else:
+            fullseq_losses = 0
             for k, scores in scores_dict.items():
-                loss, nll_loss, logging_output = compute(
+                loss, nll_loss, fullseq_loss, logging_output = compute(
                     scores,
                     target_dict[k],
                     label_mask_dict[k],
@@ -359,6 +363,7 @@ class StructAARDMCrossEntropyLoss(nn.CrossEntropyLoss):
                 )
                 losses += loss
                 nll_losses += nll_loss
+                fullseq_losses += fullseq_loss
                 logging_output_dict.update(logging_output)
             logging_output_dict["sample_size"] = logging_output[
                 f"{k}/sample_size"
@@ -373,4 +378,10 @@ class StructAARDMCrossEntropyLoss(nn.CrossEntropyLoss):
                 f"{k}/fullseq_nll_loss"
             ]
             logging_output_dict["ppl"] = logging_output[f"{k}/ppl"]
-            return losses / len(scores_dict.keys()), logging_output_dict
+            n_keys = len(scores_dict.keys())
+            total_loss = losses / n_keys
+            if fullseq_loss_weight > 0:
+                total_loss = total_loss + fullseq_loss_weight * (
+                    fullseq_losses / n_keys
+                )
+            return total_loss, logging_output_dict

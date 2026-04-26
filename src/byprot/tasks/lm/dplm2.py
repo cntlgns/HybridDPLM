@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
+from contextlib import contextmanager
 from typing import Any, Callable, List, Union
 
 import torch
@@ -12,6 +13,7 @@ from torch.nn import functional as F
 from torchmetrics import CatMetric, MaxMetric, MeanMetric, MinMetric, SumMetric
 
 from byprot import utils
+from byprot.models.structok.modules.ema import LitEma
 from byprot.tasks import TaskLitModule, register_task
 from byprot.utils.config import compose_config as Cfg
 from byprot.utils.config import merge_config
@@ -46,6 +48,10 @@ class DPLM2TrainingTask(TaskLitModule):
             watch_t1_t2_loss=False,
             cal_constant_loss=False,
             weight="constant",
+            validation_max_iter=50,
+            use_ema=False,
+            ema_decay=0.999,
+            fullseq_loss_weight=0.0,
         ),
     )
 
@@ -67,6 +73,14 @@ class DPLM2TrainingTask(TaskLitModule):
         self.build_model()
         self.tokenizer = self.model.tokenizer
 
+        # EMA
+        self.use_ema = self.hparams.learning.get("use_ema", False)
+        if self.use_ema:
+            ema_decay = self.hparams.learning.get("ema_decay", 0.999)
+            self.model_ema = LitEma(self, decay=ema_decay, use_num_upates=False)
+            log.info(f"Initialized EMA with decay={ema_decay} (no warmup, finetuning mode)")
+            self._ema_last_global_step = -1
+
     def setup(self, stage=None) -> None:
         super().setup(stage)
 
@@ -84,6 +98,31 @@ class DPLM2TrainingTask(TaskLitModule):
                 self.trainer.strategy.model, norm_type=2
             )
             self.log_dict(grad_norm_dict)
+
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        if self.use_ema and self.global_step != self._ema_last_global_step:
+            # Only update EMA once per optimizer step, not per micro-batch
+            self.model_ema(self)
+            self._ema_last_global_step = self.global_step
+            if self.global_step % 8 == 0 and self.global_rank == 0:
+                self.log("ema/num_updates", float(self.model_ema.num_updates),
+                         on_step=True, on_epoch=False, prog_bar=False)
+
+    @contextmanager
+    def ema_scope(self, context=None):
+        if self.use_ema:
+            self.model_ema.store(self.parameters())
+
+            self.model_ema.copy_to(self)
+            if context is not None:
+                log.info(f"{context}: Switched to EMA weights")
+        try:
+            yield None
+        finally:
+            if self.use_ema:
+                self.model_ema.restore(self.parameters())
+                if context is not None:
+                    log.info(f"{context}: Restored training weights")
 
     def build_model(self):
         log.info(f"Instantiating neural model <{self.hparams.model._target_}>")
@@ -108,6 +147,12 @@ class DPLM2TrainingTask(TaskLitModule):
         self.eval_aatype_loss = MeanMetric()
         self.eval_struct_acc = MeanMetric()
         self.eval_aatype_acc = MeanMetric()
+
+        # Inference-based sequence recovery
+        self.eval_seq_recovery = MeanMetric()
+
+        # [TEMP] no-EMA loss for comparison
+        self.eval_loss_no_ema = MeanMetric()
 
     def load_from_ckpt(self, ckpt_path, not_load=False):
         # do not load state dict from ckpt, just use the initialized parameters.
@@ -164,6 +209,9 @@ class DPLM2TrainingTask(TaskLitModule):
             weights,
             watch_t1_t2_loss=self.hparams.learning.watch_t1_t2_loss,
             cal_constant_loss=self.hparams.learning.cal_constant_loss,
+            fullseq_loss_weight=self.hparams.learning.get(
+                "fullseq_loss_weight", 0.0
+            ),
         )
 
         # calculate index accuracy
@@ -230,34 +278,104 @@ class DPLM2TrainingTask(TaskLitModule):
 
     # -------# Evaluating #-------- #
     def validation_step(self, batch: Any, batch_idx: int):
-        loss, logging_output = self.step(batch)
+        # [TEMP] Compare EMA vs no-EMA with identical random state
+        if self.use_ema:
+            rng_state = torch.random.get_rng_state()
+            cuda_rng_state = torch.cuda.get_rng_state()
 
-        # log other metrics
-        sample_size = logging_output["sample_size"]
-        self.eval_loss.update(loss, weight=sample_size)
-        self.eval_nll_loss.update(
-            logging_output["nll_loss"], weight=sample_size
-        )
+            loss_no_ema, logging_output_no_ema = self.step(batch)
+            sample_size_no_ema = logging_output_no_ema["sample_size"]
+            self.eval_loss_no_ema.update(loss_no_ema, weight=sample_size_no_ema)
 
-        for log_key in logging_output:
-            if "constant_diff_loss" not in log_key:
-                continue
-            log_value = logging_output[log_key]
-            eval_type = log_key.split("/")[0]
-            if eval_type == "aatype":
-                self.eval_aatype_loss.update(log_value, weight=sample_size)
-            elif eval_type == "struct":
-                self.eval_struct_loss.update(log_value, weight=sample_size)
-            else:
-                raise NotImplementedError
-        self.eval_aatype_acc.update(
-            logging_output["aatype/index_accuracy"], weight=sample_size
-        )
-        self.eval_struct_acc.update(
-            logging_output["struct/index_accuracy"], weight=sample_size
-        )
+            # Restore RNG so EMA evaluation uses the same timesteps & noise
+            torch.random.set_rng_state(rng_state)
+            torch.cuda.set_rng_state(cuda_rng_state)
+
+        with self.ema_scope(context="validation" if batch_idx == 0 else None):
+            loss, logging_output = self.step(batch)
+
+            # log other metrics
+            sample_size = logging_output["sample_size"]
+            self.eval_loss.update(loss, weight=sample_size)
+            self.eval_nll_loss.update(
+                logging_output["nll_loss"], weight=sample_size
+            )
+
+            for log_key in logging_output:
+                if "constant_diff_loss" not in log_key:
+                    continue
+                log_value = logging_output[log_key]
+                eval_type = log_key.split("/")[0]
+                if eval_type == "aatype":
+                    self.eval_aatype_loss.update(log_value, weight=sample_size)
+                elif eval_type == "struct":
+                    self.eval_struct_loss.update(log_value, weight=sample_size)
+                else:
+                    raise NotImplementedError
+            self.eval_aatype_acc.update(
+                logging_output["aatype/index_accuracy"], weight=sample_size
+            )
+            self.eval_struct_acc.update(
+                logging_output["struct/index_accuracy"], weight=sample_size
+            )
+
+            # --- Inference-based sequence recovery (inverse folding) ---
+            seq_recovery = self._compute_inference_seq_recovery(batch)
+            if seq_recovery is not None:
+                bsz = batch["aatype_tokens"]["targets"].size(0)
+                self.eval_seq_recovery.update(seq_recovery, weight=bsz)
 
         return {"loss": loss}
+
+    @torch.no_grad()
+    def _compute_inference_seq_recovery(self, batch):
+        """Run full inference (iterative denoising) on the batch and compute
+        amino acid sequence recovery against ground truth."""
+        model = self.model
+        max_iter = self.hparams.learning.get("validation_max_iter", 50)
+
+        struct_target = batch["struct_tokens"]["targets"]  # [B, L]
+        aatype_target = batch["aatype_tokens"]["targets"]  # [B, L]
+
+        # Build input_tokens: [struct, aa] concatenated along seq dim
+        # For inverse folding: struct is given, aa is fully masked
+        input_tokens = torch.cat([struct_target, aatype_target], dim=1)
+
+        type_ids = model.get_modality_type(input_tokens)
+        non_special = model.get_non_special_symbol_mask(input_tokens)
+        aa_positions = (type_ids == model.aa_type) & non_special
+
+        # Mask all AA positions
+        input_tokens = input_tokens.clone()
+        input_tokens[aa_positions] = model.aa_mask_id
+
+        # partial_masks: struct positions (should NOT be re-masked during decoding)
+        partial_masks = type_ids == model.struct_type
+
+        # Run iterative denoising
+        was_training = model.training
+        outputs = model.generate(
+            input_tokens=input_tokens,
+            max_iter=max_iter,
+            temperature=1.0,
+            partial_masks=partial_masks,
+            sampling_strategy="annealing@2.0:0.1",
+        )
+        if was_training:
+            model.train()
+
+        # Extract predicted AA tokens
+        output_tokens = outputs["output_tokens"]
+        _, pred_aa = output_tokens.chunk(2, dim=1)
+
+        # Compute recovery: match predicted vs ground truth on non-special AA positions
+        aa_non_special = model.get_non_special_symbol_mask(aatype_target)
+        correct = (pred_aa == aatype_target) & aa_non_special
+        total = aa_non_special.sum()
+        if total == 0:
+            return None
+        recovery = correct.sum().float() / total.float()
+        return recovery
 
     def on_validation_epoch_end(self):
         log_key = "test" if self.stage == "test" else "val"
@@ -328,6 +446,29 @@ class DPLM2TrainingTask(TaskLitModule):
         #     on_epoch=True,
         #     prog_bar=True,
         # )
+
+        # [TEMP] Log no-EMA loss for comparison
+        if self.use_ema:
+            eval_loss_no_ema = self.eval_loss_no_ema.compute()
+            self.eval_loss_no_ema.reset()
+            self.log(
+                f"{log_key}/loss_no_ema",
+                eval_loss_no_ema,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+            )
+
+        # Inference-based sequence recovery
+        eval_seq_recovery = self.eval_seq_recovery.compute()
+        self.eval_seq_recovery.reset()
+        self.log(
+            f"{log_key}/seq_recovery",
+            eval_seq_recovery,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+        )
 
         if self.stage == "fit":
             self.val_ppl_best.update(eval_ppl)

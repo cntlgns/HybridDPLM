@@ -44,7 +44,7 @@ class DPLMInvFold(nn.Module):
         super().__init__()
 
         self.encoder = utils.instantiate_from_config(
-            cfg=cfg.encoder, group="model"
+            cfg=cfg.c, group="model"
         )
         self.decoder = DPLMWithConditionalAdatper.from_pretrained(
             cfg=cfg.decoder
