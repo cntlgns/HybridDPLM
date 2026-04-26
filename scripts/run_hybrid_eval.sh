@@ -59,9 +59,9 @@ fi
 for DS in "${DATASETS[@]}"; do
     INPUT_FASTA="data-bin/${DS}/struct.fasta"
     # Save results to local storage
-    LOCAL_SAVE_DIR="${LOCAL_BASE}/generation-results/hybrid_invfold_test/divby30_right/${EXP_NAME}/${DS}/${CKPT_BASENAME}"
+    LOCAL_SAVE_DIR="${LOCAL_BASE}/generation-results/hybrid_invfold_FT4/${EXP_NAME}/${DS}/${CKPT_BASENAME}"
     # Corresponding remote path for rsync target
-    REMOTE_SAVE_DIR="${REMOTE_RESULTS}/hybrid_invfold_test/divby30_right/${EXP_NAME}/${DS}/${CKPT_BASENAME}"
+    REMOTE_SAVE_DIR="${REMOTE_RESULTS}/hybrid_invfold_FT4/${EXP_NAME}/${DS}/${CKPT_BASENAME}"
 
     # Select metadata csv and data_dir matching the dataset
     if [ "$DS" = "PDB_date" ]; then
@@ -92,6 +92,7 @@ for DS in "${DATASETS[@]}"; do
     # Step 1: Generate (using local checkpoint, saving to local storage)
     python generate_dplm2_hybrid.py \
         --ckpt_path "$CKPT_PATH" \
+        --use_ema \
         --task inverse_folding \
         --input_fasta_path "$INPUT_FASTA" \
         --saveto "$LOCAL_SAVE_DIR" \

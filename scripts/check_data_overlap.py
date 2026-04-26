@@ -134,6 +134,7 @@ def main():
     valid_df = load_valid()
     pdb_date = read_fasta(PDB_DATE_FASTA)
     cameo = read_fasta(CAMEO_FASTA)
+    import ipdb; ipdb.set_trace()
 
     pdb_date_struct = read_fasta(PDB_DATE_STRUCT_FASTA)
     cameo_struct = read_fasta(CAMEO_STRUCT_FASTA)

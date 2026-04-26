@@ -4,16 +4,16 @@ Submits a short srun job to each node to remove /data_large/unsynced_store/sihun
 
 Usage:
     python cleanup_local.py              # all idle RTX3090 nodes
-    python cleanup_local.py peach tomato  # specific nodes only
+    python scripts/cleanup_local.py peach tomato  # specific nodes only
 """
 import sys
 import subprocess
 
 RTX3090_NODES = [
-    "kiwi", "lemon", "mango", "nutella", "orange", "peach",
+    "kiwi", "mango", "nutella", "orange", "peach",
     "quiznos", "radish", "tomato", "udon", "watermelon", "xoi",
     "yogurt", "vanilla",
-]
+] # "lemon",
 
 LOCAL_BASE = "/data_large/unsynced_store/sihun/diffprotein/dplm"
 

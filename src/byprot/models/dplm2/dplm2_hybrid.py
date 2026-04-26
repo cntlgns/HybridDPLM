@@ -65,6 +65,15 @@ class HybridSpecificConfig:
     # Loss weighting: "hybrid" (ELBO-derived 1/t) or "linear" (original DPLM2)
     loss_weight: str = field(default="hybrid")
 
+    # Whether to row-wise L2-normalize embedding weights when they are used
+    # outside of the LN-covered forward path, i.e. as a noise basis or as the
+    # clean target E_Y0 in the ODE score. When True, normalization is applied at:
+    #   - _init_hybrid_inference_state (onehot): noise basis W[v_start:v_end]
+    #   - generate() ODE step: E_Y0 = W[_tokens]
+    #   - _apply_onehot_noise (train): noise basis W[vocab_start:vocab_end]
+    # (Clean embeddings fed to the model keep raw norms — LN handles them.)
+    use_normal_emb: bool = field(default=False)
+
 
 @dataclass
 class DPLM2HybridConfig(DPLM2Config):
@@ -277,6 +286,12 @@ class HybridDiffusionProteinLanguageModel(
         """Return fixed lambda_bias from config."""
         return self.cfg.hybrid.lambda_bias
 
+    def _maybe_normalize_emb(self, emb: torch.Tensor) -> torch.Tensor:
+        """Row-wise L2-normalize embedding rows when cfg.hybrid.use_normal_emb is set."""
+        if getattr(self.cfg.hybrid, "use_normal_emb", False):
+            return torch.nn.functional.normalize(emb, p=2, dim=-1)
+        return emb
+
     # ------------------------------------------------------------------
     # Hybrid noising
     # ------------------------------------------------------------------
@@ -311,7 +326,7 @@ class HybridDiffusionProteinLanguageModel(
         # 3. Get clean embeddings for all positions
         W = self._get_word_embeddings()  # [V, d]
         # W[self.aa_mask_id] = torch.zeros_like(W[self.aa_mask_id])  # align with dplm2
-        clean_embeds = W[x_0]  # [B, L, d]
+        clean_embeds = self._maybe_normalize_emb(W[x_0])  # [B, L, d]
 
         # 4. Compute noisy embeddings for corrupted positions
         if noise_space == "onehot":
@@ -358,7 +373,7 @@ class HybridDiffusionProteinLanguageModel(
                 continue
 
             V_mod = vocab_end - vocab_start
-            W_mod = W[vocab_start:vocab_end]  # [V_mod, d]
+            W_mod = self._maybe_normalize_emb(W[vocab_start:vocab_end])  # [V_mod, d]
 
             n = mod_mask.sum().item()
             eps = torch.randn(n, V_mod, device=device, dtype=clean_embeds.dtype)
@@ -602,7 +617,7 @@ class HybridDiffusionProteinLanguageModel(
         if noise_space == "onehot":
             y_cache = torch.zeros(B, L, d, device=device, dtype=W.dtype)
             for mod_type, v_start, v_end in [
-                (self.aa_type, 0, 33),
+                (self.aa_type, 4, 24),
                 (self.struct_type, 33, W.shape[0]),
             ]:
                 pos = (type_ids == mod_type) & output_masks
@@ -611,12 +626,12 @@ class HybridDiffusionProteinLanguageModel(
                 V_mod = v_end - v_start
                 n = pos.sum().item()
                 eps = torch.randn(n, V_mod, device=device, dtype=W.dtype)
-                y_cache[pos] = sigma_init * (eps @ W[v_start:v_end])
+                W_basis = self._maybe_normalize_emb(W[v_start:v_end])
+                y_cache[pos] = (sigma_init * (eps @ W_basis)).to(y_cache.dtype)
         else:
             y_cache = sigma_init * torch.randn(
                 B, L, d, device=device, dtype=W.dtype
-            ) / 30  ###### sihun: scale down noise for embedding space / case we are trained by (sigma_min, sigma_max) =(0.5, 5.0) and want to scale noise down for inference by 1/12
- 
+            )
         clean_mask = ~output_masks
         return y_cache, clean_mask
 
@@ -827,15 +842,17 @@ class HybridDiffusionProteinLanguageModel(
                     1.0 - alpha_curr + 1e-8
                 )
                 n_corrupted = still_corrupted.sum(dim=1)
+                # k_per_sample = (
+                #     unmask_rate * n_corrupted.float()
+                # ).ceil().long().clamp(min=1)
                 k_per_sample = (
                     unmask_rate * n_corrupted.float()
-                ).ceil().long().clamp(min=1)
+                ).floor().long()                                # sihun: hybrid refine if no need to sample
                 newly_clean = self._select_topk_to_unmask(
                     _scores, still_corrupted, k_per_sample,
                 )
             else:
                 newly_clean = torch.zeros_like(still_corrupted)
-            # import ipdb; ipdb.set_trace()
 
             # Commit tokens at newly unmasked positions
             output_tokens[newly_clean] = _tokens[newly_clean]
@@ -846,10 +863,9 @@ class HybridDiffusionProteinLanguageModel(
             still_corrupted = ~clean_mask & output_masks
             if still_corrupted.any() and sigma_curr > 0 and sigma_next > 0:
                 W = self._get_word_embeddings()
-                E_Y0 = W[_tokens]
+                E_Y0 = self._maybe_normalize_emb(W[_tokens])
                 score = (y_cache - E_Y0) / (sigma_curr**2)
                 dt = 0.5 * (sigma_curr**2 - sigma_next**2)
-                # dt = 0.5 * (sigma_curr - sigma_next)
                 y_cache = y_cache - dt * score
 
             history.append(output_tokens.clone())

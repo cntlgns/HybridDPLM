@@ -1,17 +1,17 @@
 # @package _global_
 
-# DPLM2 + Hybrid hybrid discrete-continuous diffusion finetuning
+# DPLM2 + Hybrid hybrid discrete-continuous diffusion finetuning (3B)
 #
-# This config finetunes DPLM2-650M with Hybrid's hybrid noising:
+# This config finetunes DPLM2-3B with Hybrid's hybrid noising:
 #   - Discrete masking (same as DPLM2) + Continuous Gaussian noise
 #   - Decouples discrete identity corruption from continuous rank degradation
 #
 # Usage:
-#   python train.py experiment=dplm2/dplm2_hybrid_650m
+#   python train.py experiment=dplm2/dplm2_hybrid_3b
 #
 # To finetune from a pre-trained DPLM2 checkpoint instead of DPLM:
 #   1. Set training_stage to "finetune_from_dplm2_hf"
-#   2. Set net.pretrained_model_name_or_path to "airkingbd/dplm2_650m"
+#   2. Set net.pretrained_model_name_or_path to "airkingbd/dplm2_3b"
 #   3. Set net.pretrain to false (loading handled by Hybrid class)
 
 defaults:
@@ -19,13 +19,13 @@ defaults:
   - /callbacks: lm
   - /trainer: ddp_bf16
 
-project: "DPLM2_Hybrid_650m_FTO2_0424"
-name: "dplm2_hybrid_650m"
+project: "DPLM2_Hybrid_3B_FT_0417_test"
+name: "dplm2_hybrid_3b"
 
 datamodule:
   data_dir: ${paths.data_dir}
   csv_file: pdb_swissprot
-  vocab_file: airkingbd/dplm2_650m
+  vocab_file: airkingbd/dplm2_3b
   struct_vocab_size: 8192
   max_tokens: 2000
   max_len: 512
@@ -33,7 +33,7 @@ datamodule:
 model:
   _target_: dplm2_hybrid
   num_diffusion_timesteps: 500
-  gradient_ckpt: false
+  gradient_ckpt: true
   # --- Training stage ---
   # "train_from_dplm": start from DPLM (sequence-only), expand vocab (same as original DPLM2)
   # "finetune_from_dplm2_hf": start from HuggingFace DPLM2 (struct tokens already trained)
@@ -66,13 +66,13 @@ model:
     # Row-wise L2-normalize raw embedding rows when used as noise basis
     # (_apply_onehot_noise / _init_hybrid_inference_state) or as E_Y0 in
     # the ODE step. Clean-input path (fed to LN) is unaffected.
-    use_normal_emb: false
+    use_normal_emb: true
   # --- ESM embedding config ---
   token_dropout: false
   cutoff_layer0_attn_residual: true # if set to true, lambda_bias won't matter the result
   # --- LoRA config ---
   lora:
-    enable: true
+    enable: false
     lora_rank: 16
     lora_dropout: 0.1
     lora_target_module: (esm.encoder.layer.[0-9]*.attention.(self.query|self.key|self.value|output.dense).*|esm.encoder.layer.[0-9]*.(intermediate|output).dense.*)
@@ -81,10 +81,10 @@ model:
   # --- Network backbone ---
   net:
     arch_type: esm
-    name: airkingbd/dplm_650m
+    name: airkingbd/dplm_3b
     dropout: 0.1
     pretrain: false
-    pretrained_model_name_or_path: airkingbd/dplm2_650m
+    pretrained_model_name_or_path: airkingbd/dplm2_3b
   # --- Self-mixup (disabled for Hybrid) ---
   self_mixup:
     enable: false
@@ -140,15 +140,15 @@ train:
   patience: 1000
 
 trainer:
-  min_epochs: 10
-  max_epochs: 15
+  min_epochs: 25
+  max_epochs: 50
   gradient_clip_val: 0.5
   num_sanity_val_steps: -1
   reload_dataloaders_every_n_epochs: 1
   use_distributed_sampler: false
   max_steps: 100_000
-  accumulate_grad_batches: 8
+  accumulate_grad_batches: 16
   check_val_every_n_epoch: null
-  val_check_interval: 16000
+  val_check_interval: 160
   enable_progress_bar: true
   num_nodes: 1

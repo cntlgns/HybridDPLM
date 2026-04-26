@@ -7,7 +7,7 @@ Usage:
     python run_hybrid_eval.py <ckpt_root_dir>
 
 Example:
-    python run_hybrid_eval.py /data_fast/home/sihun/diffprotein/dplm/train_logs/candi_const_weight_ft5/checkpoints
+    python scripts/run_hybrid_eval.py /data_fast/home/sihun/diffprotein/dplm/train_logs/candi_const_weight_ft5/checkpoints
 """
 import sys
 import os
@@ -23,7 +23,7 @@ PART_TO_PY = {
 
 PROJECT_DIR = "/data_fast/home/sihun/diffprotein/dplm"
 SCRIPT_PATH = f"{PROJECT_DIR}/scripts/run_hybrid_eval.sh"
-RESULT_BASE = f"{PROJECT_DIR}/generation-results/hybrid_invfold_test"
+RESULT_BASE = f"{PROJECT_DIR}/generation-results/hybrid_invfold_FT4"
 
 DATASETS = ["cameo2022", "PDB_date"] # "cameo2022", "PDB_date"
 EXCLUDE_CKPTS = {"best.ckpt", "last.ckpt"}
@@ -117,7 +117,10 @@ def run_slurm(ckpt_root: str):
             if os.path.isdir(result_dir):
                 print(f"  [skip] {ckpt_basename} / {ds} (already done)")
                 continue
-            cmd = f"{SCRIPT_PATH} {ckpt_path} {ds}"
+            if ds == "cameo2022":
+                cmd = f"{SCRIPT_PATH} {ckpt_path} {ds} argmax 100 20"
+            else:
+                cmd = f"{SCRIPT_PATH} {ckpt_path} {ds}"
             combos.append(cmd)
 
     if not combos:
@@ -131,12 +134,12 @@ def run_slurm(ckpt_root: str):
         param_option=1,
         base_cmd="bash",
         param_dict=PARAM_DICT,
-        partition="ada",
-        exclude="kiwi,lemon,mango,nutella,peach,quiznos,radish,tomato,udon,watermelon,xoi,yogurt,vanilla",
+        partition="rtx3090",
+        # exclude="kiwi,lemon,mango,nutella,peach,quiznos,radish,tomato,udon,watermelon,xoi,yogurt,vanilla",
         qos="normal",
         timeout="3-0",
         job_name="hybrid_eval",
-        max_job_num=50,
+        max_job_num=180,
         part_to_py=PART_TO_PY,
     )
 

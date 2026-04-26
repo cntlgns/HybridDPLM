@@ -37,14 +37,18 @@ STAT_FUNCS = {
 }
 
 
-PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = '/data_fast/home/sihun/diffprotein/dplm'
+# os.path.dirname(os.path.abspath(__file__))
+# import ipdb; ipdb.set_trace()  # --- IGNORE ---
 
 
-def summarize(exp_name, dataset, model_name, sampling_strategy, remasking_strategy="uncond"):
+def summarize(exp_name, dataset, model_name, sampling_strategy, remasking_strategy="uncond", max_iter=1):
     base_dir = os.path.join(PROJECT_DIR, "generation-results", exp_name)
+    run_dir = os.path.join(base_dir, dataset, model_name, sampling_strategy, remasking_strategy)
+    if int(max_iter) != 1:
+        run_dir = os.path.join(run_dir, f"iter{max_iter}")
     input_csv = os.path.join(
-        base_dir, dataset, model_name, sampling_strategy, remasking_strategy,
-        "inverse_folding", "aatype", "eval", "all_top_samples.csv",
+        run_dir, "inverse_folding", "aatype", "eval", "all_top_samples.csv",
     )
     output_csv = os.path.join(base_dir, "summary.csv")
 
@@ -56,6 +60,7 @@ def summarize(exp_name, dataset, model_name, sampling_strategy, remasking_strate
         "model_name": model_name,
         "sampling_strategy": sampling_strategy,
         "remasking_strategy": remasking_strategy,
+        "max_iter": int(max_iter),
         "num_samples": len(df),
     }
 
@@ -86,6 +91,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_name", required=True)
     parser.add_argument("--sampling_strategy", required=True)
     parser.add_argument("--remasking_strategy", default="uncond")
+    parser.add_argument("--max_iter", type=int, default=1)
     args = parser.parse_args()
 
     summarize(
@@ -94,4 +100,5 @@ if __name__ == "__main__":
         args.model_name,
         args.sampling_strategy,
         args.remasking_strategy,
+        args.max_iter,
     )
