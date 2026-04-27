@@ -19,7 +19,7 @@ defaults:
   - /callbacks: lm
   - /trainer: ddp_bf16
 
-project: "DPLM2_Hybrid_650m_FT8_0427"
+project: "DPLM2_Hybrid_650m_FTO3_0427"
 name: "dplm2_hybrid_650m"
 
 datamodule:
@@ -27,7 +27,7 @@ datamodule:
   csv_file: pdb_swissprot
   vocab_file: airkingbd/dplm2_650m
   struct_vocab_size: 8192
-  max_tokens: 8000
+  max_tokens: 2000
   max_len: 512
 
 model:
@@ -147,8 +147,8 @@ trainer:
   reload_dataloaders_every_n_epochs: 1
   use_distributed_sampler: false
   max_steps: 100_000
-  accumulate_grad_batches: 8
+  accumulate_grad_batches: 32
   check_val_every_n_epoch: null
-  val_check_interval: 3280
+  val_check_interval: 13120
   enable_progress_bar: true
   num_nodes: 1

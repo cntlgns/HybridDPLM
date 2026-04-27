@@ -30,17 +30,18 @@ PART_TO_BASH = {
 
 # ─── Sweep axes ───────────────────────────────────────────────────────────────
 
-NOISE_SPACES = ["embedding"] # "embedding", "onehot"
+NOISE_SPACES = ["onehot"] # "embedding", "onehot"
 
 # (sigma_min, sigma_max, tag)
 NOISE_SCHEDULE_CONFIG = {
     # "embedding": [(0.001, 0.4, "xlow_noise"), (0.01, 0.4, "low_noise"), (0.05, 0.5, "mid_noise"), (0.1, 0.5, "high_noise")],
     # "embedding": [(0.2, 2.0, "low_noise"), (1.0, 15.0, "xhigh_noise"), (1.0, 20.0, "xxhigh_noise")],
     # "embedding": [(1.0, 15.0, "xhigh_noise"), (1.0, 20.0, "2xhigh_noise")], #FT5
-    "embedding": [(0.5, 5.0, "high_noise")],#, (1.0, 10.0, "xhigh_noise")], #FT6
+    # "embedding": [(0.5, 5.0, "high_noise")],#, (1.0, 10.0, "xhigh_noise")], #FT6
     # "onehot":    [(0.1, 0.45, "high_noise"), (0.25, 0.47, "xhigh_noise"), (0.25, 0.48, "2xhigh_noise"), (0.40, 0.48, "hard_noise")], #FTO2 (0.5, 5.0), (1.0, 10.0), (1.0, 14.0) for FT6(normemb)
     # "onehot":    [(0.1, 0.45, "high_noise"), (0.25, 0.47, "xhigh_noise"), (0.25, 0.48, "2xhigh_noise"), (0.25, 0.49, "3xhigh_noise")], #FTO2 (0.5, 5.0), (1.0, 10.0), (1.0, 14.0), (1.0, 28.0) for FT7(pureemb)
     # "onehot":    [(0.01, 0.10, "low_noise"), (0.01, 0.25, "default_noise"), (0.10, 0.40, "high_noise"), (0.01, 0.40, "wide_noise")], # FTO1
+    "onehot":    [(0.25, 0.47, "xhigh_noise")], #FTO3 (1.0, 10.0), (1.0, 14.0) for FT6(normemb)
 }
 
 # (enable, rank, train_layer_norm, tag)
@@ -196,7 +197,7 @@ def main():
             param_option=1,
             base_cmd="bash",
             param_dict={"": full_cmds},
-            partition="a100",
+            partition="ada",
             exclude="alpaca",
             qos="normal",
             timeout="5-0",
