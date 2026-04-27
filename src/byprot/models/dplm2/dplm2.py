@@ -92,6 +92,13 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
         )
         self._prepare_special_token()
         self.cfg.tokenizer.vocab_size = len(self.tokenizer)
+
+        # Direct-load from HuggingFace DPLM2 (skips get_net_dplm2's
+        # train_from_dplm reinit + vocab-expansion path that would clobber
+        # the pretrained struct embeddings).
+        if net is None and getattr(self.cfg, "training_stage", "") == "finetune_from_dplm2_hf":
+            net = self._load_dplm2_from_hf(self.cfg)
+
         if net is None:
             self.net = get_net_dplm2(self.cfg)
         else:
@@ -109,6 +116,35 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
 
     def _update_cfg(self, cfg):
         self.cfg = OmegaConf.merge(self._default_cfg, cfg)
+
+    @staticmethod
+    def _load_dplm2_from_hf(cfg):
+        """Load a pre-trained DPLM2 ESM backbone from HuggingFace, with optional LoRA wrap."""
+        from byprot.models.dplm2.modules.dplm2_modeling_esm import EsmForDPLM2
+
+        hf_name = cfg.net.pretrained_model_name_or_path
+        net = EsmForDPLM2.from_pretrained(hf_name)
+
+        if cfg.lora.enable:
+            lora_target_module = cfg.lora.lora_target_module
+            modules_to_save = cfg.lora.modules_to_save.split(",")
+            peft_config = LoraConfig(
+                task_type=TaskType.SEQ_2_SEQ_LM,
+                target_modules=lora_target_module,
+                modules_to_save=modules_to_save,
+                inference_mode=False,
+                r=cfg.lora.lora_rank,
+                lora_alpha=32,
+                lora_dropout=cfg.lora.lora_dropout,
+            )
+            net = get_peft_model(net, peft_config)
+
+            if getattr(cfg.lora, "train_layer_norm", False):
+                for name, param in net.named_parameters():
+                    if "LayerNorm" in name:
+                        param.requires_grad = True
+
+        return net
 
     @property
     def special_token_list(self):

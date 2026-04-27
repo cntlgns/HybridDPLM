@@ -19,7 +19,7 @@ defaults:
   - /callbacks: lm
   - /trainer: ddp_bf16
 
-project: "DPLM2_Hybrid_650m_FTO2_0424"
+project: "DPLM2_Hybrid_650m_FT8_0427"
 name: "dplm2_hybrid_650m"
 
 datamodule:
@@ -27,7 +27,7 @@ datamodule:
   csv_file: pdb_swissprot
   vocab_file: airkingbd/dplm2_650m
   struct_vocab_size: 8192
-  max_tokens: 2000
+  max_tokens: 8000
   max_len: 512
 
 model:
@@ -66,7 +66,7 @@ model:
     # Row-wise L2-normalize raw embedding rows when used as noise basis
     # (_apply_onehot_noise / _init_hybrid_inference_state) or as E_Y0 in
     # the ODE step. Clean-input path (fed to LN) is unaffected.
-    use_normal_emb: false
+    use_normal_emb: true
   # --- ESM embedding config ---
   token_dropout: false
   cutoff_layer0_attn_residual: true # if set to true, lambda_bias won't matter the result
@@ -140,8 +140,8 @@ train:
   patience: 1000
 
 trainer:
-  min_epochs: 10
-  max_epochs: 15
+  min_epochs: 30
+  max_epochs: 50
   gradient_clip_val: 0.5
   num_sanity_val_steps: -1
   reload_dataloaders_every_n_epochs: 1
@@ -149,6 +149,6 @@ trainer:
   max_steps: 100_000
   accumulate_grad_batches: 8
   check_val_every_n_epoch: null
-  val_check_interval: 16000
+  val_check_interval: 3280
   enable_progress_bar: true
   num_nodes: 1

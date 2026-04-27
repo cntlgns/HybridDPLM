@@ -52,7 +52,7 @@ def cleanup_nodes(nodes: list[str]):
             continue
 
         cmd = (
-            f"srun -p rtx3090 -w {node} --time=00:01:00 -n1 "
+            f"srun -p a100 -w {node} --time=00:01:00 -n1 "
             f"--cpus-per-task=1 --mem=1G --job-name=cleanup "
             f"bash -c '{CLEANUP_CMD}'"
         )

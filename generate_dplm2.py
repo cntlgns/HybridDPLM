@@ -311,46 +311,24 @@ def unconditional_generate(args):
         )
 
 
-def conditional_generate_from_fasta(args):
-    if args.bit_model:
-        model = DPLM2Bit.from_pretrained(args.model_name)
-    else:
-        model = DPLM2.from_pretrained(args.model_name)
+def _set_seed(seed):
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
-    tokenizer = model.tokenizer
-    model = model.eval()
-    model = model.cuda()
-    device = next(model.parameters()).device
-    if issubclass(type(model.net), PeftModel):
-        model.net = model.net.merge_and_unload()
 
+def _parse_seeds(args):
+    raw = getattr(args, "seeds", None)
+    if raw is None or raw == "":
+        return None
+    seeds = [int(s.strip()) for s in raw.split(",") if s.strip()]
+    return seeds or None
+
+
+def _run_conditional_once(args, model, device, tokenizer, save_dir):
     batches, name_lists = initialize_conditional_generation(
         args.input_fasta_path, tokenizer, device, args=args, model=model
     )
-
-# ipdb> batches[0]['input_tokens'][0]
-# tensor([  33, 8024, 3768, 7068, 2972, 5722, 7197, 7861, 4444, 4925,  279,  534,
-#         2589, 2975, 3101,  521,   34,    1,    1,    1,    1,    1,    1,    1,
-#            1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
-#            1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
-#            1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
-#            1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
-#            1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
-#            1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
-#            1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
-#            1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
-#            1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    0,   32,
-#           32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,
-#           32,   32,    2,    1,    1,    1,    1,    1,    1,    1,    1,    1,
-#            1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
-#            1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
-#            1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
-#            1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
-#            1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
-#            1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
-#            1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
-#            1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
-#            1,    1,    1,    1,    1,    1,    1,    1], device='cuda:0')
 
     for i, batch in enumerate(tqdm(batches, desc=f"{args.task}")):
         with torch.cuda.amp.autocast(dtype=torch.bfloat16):
@@ -370,13 +348,43 @@ def conditional_generate_from_fasta(args):
         save_results(
             outputs=outputs,
             task=args.task,
-            save_dir=os.path.join(args.saveto, args.task),
+            save_dir=os.path.join(save_dir, args.task),
             headers=name_lists[i],
             tokenizer=tokenizer,
             struct_tokenizer=model.struct_tokenizer,
             save_pdb=args.save_pdb,
             continue_write=True,
         )
+
+
+def conditional_generate_from_fasta(args):
+    if args.bit_model:
+        model = DPLM2Bit.from_pretrained(args.model_name)
+    else:
+        model = DPLM2.from_pretrained(args.model_name)
+
+    tokenizer = model.tokenizer
+    model = model.eval()
+    model = model.cuda()
+    device = next(model.parameters()).device
+    if issubclass(type(model.net), PeftModel):
+        model.net = model.net.merge_and_unload()
+
+    seeds = _parse_seeds(args)
+    if seeds is None:
+        _set_seed(args.seed)
+        _run_conditional_once(args, model, device, tokenizer, args.saveto)
+        return
+
+    for seed in seeds:
+        seed_save_dir = os.path.join(args.saveto, f"seed_{seed}")
+        gen_marker = os.path.join(seed_save_dir, args.task, "aatype.fasta")
+        if args.skip_if_generated and os.path.exists(gen_marker):
+            print(f"[skip-gen] seed={seed}: {gen_marker} already exists")
+            continue
+        print(f"=== Generating seed={seed} -> {seed_save_dir} ===")
+        _set_seed(seed)
+        _run_conditional_once(args, model, device, tokenizer, seed_save_dir)
 
 
 def save_fasta(
@@ -533,6 +541,21 @@ def main():
 
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--seeds",
+        type=str,
+        default="",
+        help="Comma-separated list of seeds (e.g. '42,43,44'). When set, "
+        "overrides --seed and runs generation once per seed, writing each "
+        "run to <saveto>/seed_<seed>. Model is loaded only once. "
+        "Conditional tasks only.",
+    )
+    parser.add_argument(
+        "--skip_if_generated",
+        action="store_true",
+        help="When used with --seeds, skip seeds whose <saveto>/seed_<s>/"
+        "<task>/aatype.fasta already exists.",
+    )
+    parser.add_argument(
         "--model_name", type=str, default="airkingbd/dplm_150m"
     )
     parser.add_argument("--num_seqs", type=int, default=40)
@@ -613,6 +636,9 @@ def main():
     parser.add_argument("--input_fasta_path", type=str, default="")
 
     args = parser.parse_args()
+
+    if not _parse_seeds(args):
+        _set_seed(args.seed)
 
     if args.task in [
         "backbone_generation",
