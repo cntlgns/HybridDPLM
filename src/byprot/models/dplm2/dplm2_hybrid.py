@@ -25,11 +25,6 @@ from byprot.models.dplm2.dplm2 import (
 )
 from byprot.models.utils import sample_from_categorical
 
-try:
-    from peft import LoraConfig, TaskType, get_peft_model
-except ImportError:
-    pass
-
 
 # ---------------------------------------------------------------------------
 # Config
@@ -157,10 +152,7 @@ class HybridDiffusionProteinLanguageModel(
     _default_cfg = DPLM2HybridConfig()
 
     def __init__(self, cfg, net=None):
-        # Handle loading from HuggingFace DPLM2 directly
-        if net is None and getattr(cfg, "training_stage", "") == "finetune_from_dplm2_hf":
-            net = self._load_dplm2_from_hf(cfg)
-
+        # finetune_from_dplm2_hf path is handled by the parent class.
         super().__init__(cfg, net)
 
         # Apply token_dropout setting from config
@@ -211,35 +203,6 @@ class HybridDiffusionProteinLanguageModel(
     # ------------------------------------------------------------------
     # Initialization helpers
     # ------------------------------------------------------------------
-    @staticmethod
-    def _load_dplm2_from_hf(cfg):
-        """Load a pre-trained DPLM2 ESM backbone from HuggingFace."""
-        from byprot.models.dplm2.modules.dplm2_modeling_esm import EsmForDPLM2
-
-        hf_name = cfg.net.pretrained_model_name_or_path
-        net = EsmForDPLM2.from_pretrained(hf_name)
-
-        if cfg.lora.enable:
-            lora_target_module = cfg.lora.lora_target_module
-            modules_to_save = cfg.lora.modules_to_save.split(",")
-            peft_config = LoraConfig(
-                task_type=TaskType.SEQ_2_SEQ_LM,
-                target_modules=lora_target_module,
-                modules_to_save=modules_to_save,
-                inference_mode=False,
-                r=cfg.lora.lora_rank,
-                lora_alpha=32,
-                lora_dropout=cfg.lora.lora_dropout,
-            )
-            net = get_peft_model(net, peft_config)
-
-            if getattr(cfg.lora, "train_layer_norm", False):
-                for name, param in net.named_parameters():
-                    if "LayerNorm" in name:
-                        param.requires_grad = True
-
-        return net
-
     def _get_word_embeddings(self) -> torch.Tensor:
         """Get word embedding weight tensor, handling PEFT wrapping.
 
