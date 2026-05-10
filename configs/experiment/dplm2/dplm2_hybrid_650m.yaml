@@ -19,7 +19,7 @@ defaults:
   - /callbacks: lm
   - /trainer: ddp_bf16
 
-project: "DPLM2_Hybrid_650m_FTO3_0427"
+project: "DPLM2_Hybrid_650m_linear_FT10_0428"
 name: "dplm2_hybrid_650m"
 
 datamodule:
@@ -27,7 +27,7 @@ datamodule:
   csv_file: pdb_swissprot
   vocab_file: airkingbd/dplm2_650m
   struct_vocab_size: 8192
-  max_tokens: 2000
+  max_tokens: 4000
   max_len: 512
 
 model:
@@ -62,7 +62,7 @@ model:
     # Add learned sigma embedding to model input
     use_sigma_embed: false
     # Loss weight: "hybrid" (ELBO 1/t) or "linear" (original DPLM2)
-    loss_weight: constant
+    loss_weight: linear
     # Row-wise L2-normalize raw embedding rows when used as noise basis
     # (_apply_onehot_noise / _init_hybrid_inference_state) or as E_Y0 in
     # the ODE step. Clean-input path (fed to LN) is unaffected.
@@ -101,7 +101,7 @@ task:
     watch_t1_t2_loss: false
     cal_constant_loss: true
     # Use Hybrid loss weighting (passed to model.compute_loss)
-    weight: constant
+    weight: linear
     # Number of denoising steps for inference-based validation (seq recovery)
     validation_max_iter: 50
     # EMA (Exponential Moving Average) for finetuning stability
@@ -140,15 +140,15 @@ train:
   patience: 1000
 
 trainer:
-  min_epochs: 30
-  max_epochs: 50
+  min_epochs: 15
+  max_epochs: 30
   gradient_clip_val: 0.5
   num_sanity_val_steps: -1
   reload_dataloaders_every_n_epochs: 1
   use_distributed_sampler: false
   max_steps: 100_000
-  accumulate_grad_batches: 32
+  accumulate_grad_batches: 16
   check_val_every_n_epoch: null
-  val_check_interval: 13120
+  val_check_interval: 6560
   enable_progress_bar: true
   num_nodes: 1

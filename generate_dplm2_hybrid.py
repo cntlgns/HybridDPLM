@@ -310,6 +310,17 @@ def unconditional_generate(args):
         )
 
 
+def _str2bool(v):
+    if isinstance(v, bool):
+        return v
+    s = str(v).lower()
+    if s in ("yes", "true", "t", "1"):
+        return True
+    if s in ("no", "false", "f", "0", ""):
+        return False
+    raise argparse.ArgumentTypeError(f"Boolean value expected, got: {v!r}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Hybrid diffusion generation for DPLM2"
@@ -359,7 +370,7 @@ def main():
     )
     parser.add_argument("--max_iter", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=50)
-    parser.add_argument("--save_pdb", type=bool, default=True)
+    parser.add_argument("--save_pdb", type=_str2bool, default=True)
 
     # Hybrid diffusion noise schedule (overrides model cfg when provided)
     parser.add_argument(

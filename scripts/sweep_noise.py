@@ -47,8 +47,8 @@ LORA_CONFIGS = [
 LR_SCHEDULE_CONFIGS = [
     # (1e-7, 5e-4, 1e-7, 2000, 41000, "5e4_lr"),
     # (1e-7, 2e-4, 1e-7, 2000, 41000, "2e4_lr"),
-    (1e-7, 1e-4, 1e-7, 2000, 41000, "1e4_lr"),
-    (1e-7, 3e-5, 1e-7, 2000, 41000, "3e5_lr"),
+    (1e-7, 1e-4, 1e-7, 2000, 24600, "1e4_lr"),
+    (1e-7, 3e-5, 1e-7, 2000, 24600, "3e5_lr"),
 ]
 
 # (fullseq_loss_weight, tag)
@@ -69,7 +69,7 @@ CUTOFF_L0_CONFIGS = [
 
 def make_job_name(lora_tag, lr_tag, fs_tag, cut_tag):
     """e.g. noise-full-1e4_lr-fs0-cutL0"""
-    return f"noise-{lora_tag}-{lr_tag}-{fs_tag}-{cut_tag}"
+    return f"noise-{lora_tag}-{lr_tag}-linear"
 
 
 def make_overrides(name, group,
@@ -169,7 +169,7 @@ def main():
             param_option=1,
             base_cmd="bash",
             param_dict={"": full_cmds},
-            partition="a100",
+            partition="ada",
             exclude="alpaca",
             qos="normal",
             timeout="5-0",

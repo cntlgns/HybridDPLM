@@ -29,7 +29,7 @@ SCRIPT_PATH = f"{PROJECT_DIR}/scripts/run_hybrid_eval_seeds.sh"
 # Path under generation-results/ for this sweep. Passed to the shell script so we
 # can rename result folders without editing the script (which would break already-
 # queued SLURM jobs that re-read the script when they start).
-RESULT_SUBDIR = "hybrid_invfold_FTO2_refine_1iter_seedsweep"   # e.g. "hybrid_invfold_FT7_seedsweep"
+RESULT_SUBDIR = "hybrid_invfold_FTO3_refine_100iter_seedsweep"   # e.g. "hybrid_invfold_FT7_seedsweep"
 RESULT_BASE = f"{PROJECT_DIR}/generation-results/{RESULT_SUBDIR}"
 
 # ─── Fill in the checkpoints you want to evaluate ─────────────────────────────
@@ -58,14 +58,19 @@ CKPTS: list[str] = [
     # f"{PROJECT_DIR}/train_logs/FT7/emb-xhigh_noise-full-low_lr-fs0-normemb/checkpoints/step_26017.0-loss_0.72.ckpt", #V
     # f"{PROJECT_DIR}/train_logs/FT6/emb-high_noise-full-ema_lr_745-fs0-normemb/checkpoints/step_9005.0-loss_0.67.ckpt", #V
     # f"{PROJECT_DIR}/train_logs/FT6/emb-xhigh_noise-full-ema_lr_745-fs0-normemb/checkpoints/step_5003.0-loss_0.71.ckpt",
-    f"{PROJECT_DIR}/train_logs/FTO2/oh-2xhigh_noise-16ln-orig_lr-fs0/checkpoints/step_5199.0-loss_0.71.ckpt",
-    f"{PROJECT_DIR}/train_logs/FTO2/oh-2xhigh_noise-16ln-orig_lr-fs0-normemb/checkpoints/step_5199.0-loss_0.71.ckpt",
-    f"{PROJECT_DIR}/train_logs/FTO2/oh-3xhigh_noise-16ln-orig_lr-fs0/checkpoints/step_5199.0-loss_0.71.ckpt",
-    f"{PROJECT_DIR}/train_logs/FTO2/oh-hard_noise-16ln-orig_lr-fs0-normemb/checkpoints/step_5199.0-loss_0.72.ckpt",
-    f"{PROJECT_DIR}/train_logs/FTO2/oh-high_noise-16ln-orig_lr-fs0/checkpoints/step_5199.0-loss_0.67.ckpt",
-    f"{PROJECT_DIR}/train_logs/FTO2/oh-high_noise-16ln-orig_lr-fs0-normemb/checkpoints/step_5199.0-loss_0.66.ckpt",
-    f"{PROJECT_DIR}/train_logs/FTO2/oh-xhigh_noise-16ln-orig_lr-fs0/checkpoints/step_5199.0-loss_0.71.ckpt",
-    f"{PROJECT_DIR}/train_logs/FTO2/oh-xhigh_noise-16ln-orig_lr-fs0-normemb/checkpoints/step_5199.0-loss_0.71.ckpt",
+    # f"{PROJECT_DIR}/train_logs/FTO2/oh-2xhigh_noise-16ln-orig_lr-fs0/checkpoints/step_5199.0-loss_0.71.ckpt",
+    # f"{PROJECT_DIR}/train_logs/FTO2/oh-2xhigh_noise-16ln-orig_lr-fs0-normemb/checkpoints/step_5199.0-loss_0.71.ckpt",
+    # f"{PROJECT_DIR}/train_logs/FTO2/oh-3xhigh_noise-16ln-orig_lr-fs0/checkpoints/step_5199.0-loss_0.71.ckpt",
+    # f"{PROJECT_DIR}/train_logs/FTO2/oh-hard_noise-16ln-orig_lr-fs0-normemb/checkpoints/step_5199.0-loss_0.72.ckpt",
+    # f"{PROJECT_DIR}/train_logs/FTO2/oh-high_noise-16ln-orig_lr-fs0/checkpoints/step_5199.0-loss_0.67.ckpt",
+    # f"{PROJECT_DIR}/train_logs/FTO2/oh-high_noise-16ln-orig_lr-fs0-normemb/checkpoints/step_5199.0-loss_0.66.ckpt",
+    # f"{PROJECT_DIR}/train_logs/FTO2/oh-xhigh_noise-16ln-orig_lr-fs0/checkpoints/step_5199.0-loss_0.71.ckpt",
+    # f"{PROJECT_DIR}/train_logs/FTO2/oh-xhigh_noise-16ln-orig_lr-fs0-normemb/checkpoints/step_5199.0-loss_0.71.ckpt",
+    # f"{PROJECT_DIR}/train_logs/FTO3/oh-xhigh_noise-full-3e5_lr-fs0-normemb/checkpoints/step_10256.0-loss_0.70.ckpt",
+    f"{PROJECT_DIR}/train_logs/FT10/emb-high_noise-full-3e5_lr-linear/checkpoints/step_15995.0-loss_0.20.ckpt",
+    f"{PROJECT_DIR}/train_logs/FT10/emb-1high_noise-full-1e4_lr-linear/checkpoints/step_15995.0-loss_0.21.ckpt",
+    f"{PROJECT_DIR}/train_logs/FT10/emb-xhigh_noise-full-1e4_lr-linear/checkpoints/step_15995.0-loss_0.22.ckpt",
+    f"{PROJECT_DIR}/train_logs/FT10/emb-2xhigh_noise-full-1e4_lr-linear/checkpoints/step_15995.0-loss_0.22.ckpt",
 
 ]
 
@@ -78,7 +83,7 @@ NUM_SEEDS_DEFAULT = 10
 # Per-dataset batch size tuning (matches run_hybrid_eval.py convention)
 BATCH_SIZE_BY_DATASET = {"cameo2022": 5, "PDB_date": 5}
 SAMPLING = "argmax"
-MAX_ITER = 1
+MAX_ITER = 100
 
 
 def exp_and_base(ckpt_path: str) -> tuple[str, str]:

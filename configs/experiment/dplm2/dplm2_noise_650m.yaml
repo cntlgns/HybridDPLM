@@ -15,7 +15,7 @@ defaults:
   - /callbacks: lm
   - /trainer: ddp_bf16
 
-project: "DPLM2_Noise_650m_FT_0428"
+project: "DPLM2_Noise_650m_FT2_0430"
 name: "dplm2_noise_650m"
 
 datamodule:
@@ -23,7 +23,7 @@ datamodule:
   csv_file: pdb_swissprot
   vocab_file: airkingbd/dplm2_650m
   struct_vocab_size: 8192
-  max_tokens: 8000
+  max_tokens: 2000
   max_len: 512
 
 model:
@@ -71,7 +71,7 @@ task:
   learning:
     watch_t1_t2_loss: false
     cal_constant_loss: true
-    weight: constant
+    weight: linear
     validation_max_iter: 50
     use_ema: false
     ema_decay: 0.999
@@ -105,15 +105,15 @@ train:
   patience: 1000
 
 trainer:
-  min_epochs: 30
-  max_epochs: 50
+  min_epochs: 15
+  max_epochs: 30
   gradient_clip_val: 0.5
   num_sanity_val_steps: -1
   reload_dataloaders_every_n_epochs: 1
   use_distributed_sampler: false
   max_steps: 100_000
-  accumulate_grad_batches: 8
+  accumulate_grad_batches: 32
   check_val_every_n_epoch: null
-  val_check_interval: 3280
+  val_check_interval: 13120
   enable_progress_bar: true
   num_nodes: 1

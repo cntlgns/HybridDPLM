@@ -30,18 +30,18 @@ PART_TO_BASH = {
 
 # ─── Sweep axes ───────────────────────────────────────────────────────────────
 
-NOISE_SPACES = ["onehot"] # "embedding", "onehot"
+NOISE_SPACES = ["embedding"] # "embedding", "onehot"
 
 # (sigma_min, sigma_max, tag)
 NOISE_SCHEDULE_CONFIG = {
     # "embedding": [(0.001, 0.4, "xlow_noise"), (0.01, 0.4, "low_noise"), (0.05, 0.5, "mid_noise"), (0.1, 0.5, "high_noise")],
-    # "embedding": [(0.2, 2.0, "low_noise"), (1.0, 15.0, "xhigh_noise"), (1.0, 20.0, "xxhigh_noise")],
+    "embedding": [(0.5, 5.0, "high_noise"), (1.0, 5.0, "1high_noise"), (1.0, 10.0, "xhigh_noise"), (2.0, 10.0, "2xhigh_noise")], #FT10(linear)
     # "embedding": [(1.0, 15.0, "xhigh_noise"), (1.0, 20.0, "2xhigh_noise")], #FT5
-    # "embedding": [(0.5, 5.0, "high_noise")],#, (1.0, 10.0, "xhigh_noise")], #FT6
+    # "embedding": [(0.5, 5.0, "high_noise")],#, (1.0, 10.0, "xhigh_noise")], #FT6, FT8, FT9
     # "onehot":    [(0.1, 0.45, "high_noise"), (0.25, 0.47, "xhigh_noise"), (0.25, 0.48, "2xhigh_noise"), (0.40, 0.48, "hard_noise")], #FTO2 (0.5, 5.0), (1.0, 10.0), (1.0, 14.0) for FT6(normemb)
     # "onehot":    [(0.1, 0.45, "high_noise"), (0.25, 0.47, "xhigh_noise"), (0.25, 0.48, "2xhigh_noise"), (0.25, 0.49, "3xhigh_noise")], #FTO2 (0.5, 5.0), (1.0, 10.0), (1.0, 14.0), (1.0, 28.0) for FT7(pureemb)
     # "onehot":    [(0.01, 0.10, "low_noise"), (0.01, 0.25, "default_noise"), (0.10, 0.40, "high_noise"), (0.01, 0.40, "wide_noise")], # FTO1
-    "onehot":    [(0.25, 0.47, "xhigh_noise")], #FTO3 (1.0, 10.0), (1.0, 14.0) for FT6(normemb)
+    # "onehot":    [(0.25, 0.47, "xhigh_noise")], #FTO3 (1.0, 10.0), (1.0, 14.0) for FT6(normemb)
 }
 
 # (enable, rank, train_layer_norm, tag)
@@ -63,10 +63,11 @@ LR_SCHEDULE_CONFIGS = [
     # (1e-6, 1e-3, 1e-4, 2000, 100000, "ema_lr_634"),
     # (1e-4, 1e-4, 1e-4, 0, 100000, "ema_lora_lr"),
     
-    (1e-7, 5e-4, 1e-7, 2000, 41000, "5e4_lr"),
-    (1e-7, 2e-4, 1e-7, 2000, 41000, "2e4_lr"),
-    (1e-7, 1e-4, 1e-7, 2000, 41000, "1e4_lr"),
-    (1e-7, 3e-5, 1e-7, 2000, 41000, "3e5_lr"),
+    # (1e-7, 1e-4, 1e-7, 2000, 41000, "1e4_lr"),
+    # (1e-7, 3e-5, 1e-7, 2000, 41000, "3e5_lr"), FT9
+
+    (1e-7, 1e-4, 1e-7, 2000, 24600, "1e4_lr"),
+    (1e-7, 3e-5, 1e-7, 2000, 24600, "3e5_lr"),
 ]
 
 # (fullseq_loss_weight, tag)
@@ -82,8 +83,9 @@ def make_job_name(ns_tag, noise_tag, lora_tag, lr_tag, fs_tag):
     """e.g. emb-mid_noise-64ln-my_lr-fs0.1"""
     # return f"{ns_tag}-{noise_tag}-{lora_tag}-{lr_tag}-{fs_tag}-cutL0-normemb"
     # return f"{ns_tag}-{noise_tag}-{lora_tag}-{lr_tag}-{fs_tag}-cutL0"
-    return f"{ns_tag}-{noise_tag}-{lora_tag}-{lr_tag}-{fs_tag}-normemb"
+    # return f"{ns_tag}-{noise_tag}-{lora_tag}-{lr_tag}-{fs_tag}-normemb"
     # return f"{ns_tag}-{noise_tag}-{lora_tag}-{lr_tag}-{fs_tag}"
+    return f"{ns_tag}-{noise_tag}-{lora_tag}-{lr_tag}-linear"
 
 
 def make_overrides(name, group, noise_space, noise_min, noise_max,
@@ -197,7 +199,7 @@ def main():
             param_option=1,
             base_cmd="bash",
             param_dict={"": full_cmds},
-            partition="ada",
+            partition="a100",
             exclude="alpaca",
             qos="normal",
             timeout="5-0",
