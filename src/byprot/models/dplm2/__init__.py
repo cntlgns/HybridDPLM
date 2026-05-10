@@ -4,5 +4,6 @@
 
 from .dplm2 import MultimodalDiffusionProteinLanguageModel
 from .dplm2_bit import DPLM2Bit
+from .dplm2_noise import NoiseInputDiffusionProteinLanguageModel
 from .modules.dplm2_bit_modeling_esm import EsmForDPLM2Bit
 from .modules.dplm2_modeling_esm import EsmForDPLM2

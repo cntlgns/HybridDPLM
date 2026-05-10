@@ -12,7 +12,7 @@ defaults:
 # this allows you to overwrite only specified parameters
 
 # name of the run determines folder name in logs
-project: "DPLM2_650m"
+project: "DPLM2_Noise_650m_FT2_0430"
 name: "dplm2_650m"
 
 datamodule:
@@ -29,10 +29,10 @@ model:
   gradient_ckpt: false
   # Continue-tune from the published DPLM2-650M (struct vocab already trained).
   training_stage: finetune_from_dplm2_hf
-  single_modality_ratio: 0.25
-  folding_loss_ratio: 0.25
-  inverse_folding_loss_ratio: 0.25
-  joint_loss_ratio: 0.25
+  single_modality_ratio: 0.0
+  folding_loss_ratio: 0.0
+  inverse_folding_loss_ratio: 1.0
+  joint_loss_ratio: 0.0
   independent_loss_ratio: 0.0
   lora:
     enable: true
@@ -61,7 +61,7 @@ task:
   learning:
     watch_t1_t2_loss: false
     cal_constant_loss: true
-    weight: linear
+    weight: constant
   criterion:
     _target_: byprot.modules.cross_entropy.StructAARDMCrossEntropyLoss
     label_smoothing: 0.0
@@ -91,16 +91,15 @@ train:
   patience: 1000
 
 trainer:
-  min_epochs: 10
-  max_epochs: 10000
+  min_epochs: 15
+  max_epochs: 30
   gradient_clip_val: 0.5
-  # val_check_interval: 10
-  num_sanity_val_steps: 1
+  num_sanity_val_steps: -1
   reload_dataloaders_every_n_epochs: 1
   use_distributed_sampler: false
   max_steps: 100_000
-  accumulate_grad_batches: 1
+  accumulate_grad_batches: 16
   check_val_every_n_epoch: null
-  val_check_interval: 500
+  val_check_interval: 6560
   enable_progress_bar: true
   num_nodes: 1

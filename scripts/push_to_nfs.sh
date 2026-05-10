@@ -10,7 +10,7 @@
 set -e
 
 LOCAL_BASE="/data_large/unsynced_store/sihun/diffprotein/dplm/train_logs"
-NFS_BASE="/storage/sihun/diffprotein/dplm/train_logs/FT7"
+NFS_BASE="/storage/sihun/diffprotein/dplm/train_logs/FT10"
 
 # Throttle write throughput to NFS (KB/s for rsync; suffix M = MB/s).
 # Override: BWLIMIT=100M bash scripts/push_to_nfs.sh
@@ -21,7 +21,7 @@ BWLIMIT="${BWLIMIT:-50M}"
 #   CKPT_PREFIXES="step_6499.0 step_7000.0" bash scripts/push_to_nfs.sh
 # Empty list = transfer all checkpoints.
 DEFAULT_CKPT_PREFIXES=(
-    step_14008.0
+    step_9025
 )
 
 if [ -n "${CKPT_PREFIXES:-}" ]; then
@@ -39,10 +39,7 @@ if [ ${#CKPT_PREFIXES_ARR[@]} -gt 0 ]; then
 fi
 
 DEFAULT_NAMES=(
-    emb-2xhigh_noise-full-low_lr-fs0
-    emb-xhigh_noise-full-low_lr-fs0
-    emb-xhigh_noise-full-low_lr-fs0-normemb
-    # emb-high_noise-full-low_lr-fs0-normemb
+    noise-full-1e4_lr-linear
 )
 
 if [ $# -ge 1 ]; then

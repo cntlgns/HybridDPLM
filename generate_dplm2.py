@@ -1,6 +1,10 @@
 import argparse
 import os
 
+# Saved FT checkpoints contain hydra configs that interpolate
+# ${oc.env:PROJECT_ROOT}; ensure it's set before any byprot import resolves it.
+os.environ.setdefault("PROJECT_ROOT", os.path.dirname(os.path.abspath(__file__)))
+
 from tokenizers import AddedToken
 import torch
 import tree
@@ -13,6 +17,49 @@ from byprot.models.dplm2 import DPLM2Bit
 from byprot.models.dplm2 import (
     MultimodalDiffusionProteinLanguageModel as DPLM2,
 )
+
+
+def _try_load_ema_weights(model, ckpt_path):
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    state_dict = ckpt.get("state_dict", {})
+    ema_prefix = "model_ema."
+    ema_keys = [k for k in state_dict if k.startswith(ema_prefix)]
+    if not ema_keys:
+        print("No EMA weights found in checkpoint, using training weights.")
+        return
+
+    from byprot.models.structok.modules.ema import LitEma
+    ema = LitEma(model, decay=0.999, use_num_upates=False)
+    ema_state = {}
+    for k, v in state_dict.items():
+        if not k.startswith(ema_prefix):
+            continue
+        tail = k[len(ema_prefix):]
+        if tail in ("decay", "num_updates"):
+            ema_state[tail] = v
+        elif tail.startswith("model"):
+            ema_state[tail[len("model"):]] = v
+        else:
+            ema_state[tail] = v
+    missing, unexpected = ema.load_state_dict(ema_state, strict=False)
+    ema.copy_to(model)
+    print(
+        f"Loaded EMA weights from checkpoint ({len(ema_keys)} buffers; "
+        f"missing={len(missing)}, unexpected={len(unexpected)})."
+    )
+
+
+def _load_baseline_model(args):
+    cls = DPLM2Bit if args.bit_model else DPLM2
+    if args.ckpt_path:
+        print(f"Loading baseline DPLM2 from checkpoint: {args.ckpt_path}")
+        model = cls.from_pretrained(args.ckpt_path, from_huggingface=False)
+        if args.use_ema:
+            _try_load_ema_weights(model, args.ckpt_path)
+    else:
+        print(f"Loading base DPLM2 model: {args.model_name}")
+        model = cls.from_pretrained(args.model_name)
+    return model
 
 
 def initialize_conditional_generation(
@@ -216,10 +263,7 @@ def initialize_generation(
 
 
 def unconditional_generate(args):
-    if args.bit_model:
-        model = DPLM2Bit.from_pretrained(args.model_name)
-    else:
-        model = DPLM2.from_pretrained(args.model_name)
+    model = _load_baseline_model(args)
 
     tokenizer = model.tokenizer
     model = model.eval()
@@ -358,10 +402,7 @@ def _run_conditional_once(args, model, device, tokenizer, save_dir):
 
 
 def conditional_generate_from_fasta(args):
-    if args.bit_model:
-        model = DPLM2Bit.from_pretrained(args.model_name)
-    else:
-        model = DPLM2.from_pretrained(args.model_name)
+    model = _load_baseline_model(args)
 
     tokenizer = model.tokenizer
     model = model.eval()
@@ -536,6 +577,17 @@ def save_results(
     return
 
 
+def _str2bool(v):
+    if isinstance(v, bool):
+        return v
+    s = str(v).lower()
+    if s in ("yes", "true", "t", "1"):
+        return True
+    if s in ("no", "false", "f", "0", ""):
+        return False
+    raise argparse.ArgumentTypeError(f"Boolean value expected, got: {v!r}")
+
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -556,7 +608,20 @@ def main():
         "<task>/aatype.fasta already exists.",
     )
     parser.add_argument(
-        "--model_name", type=str, default="airkingbd/dplm_150m"
+        "--ckpt_path",
+        type=str,
+        default="",
+        help="Path to finetuned baseline checkpoint (.ckpt). "
+        "If empty, uses --model_name from HuggingFace.",
+    )
+    parser.add_argument(
+        "--model_name", type=str, default="airkingbd/dplm_150m",
+        help="HuggingFace model name (used when --ckpt_path is empty).",
+    )
+    parser.add_argument(
+        "--use_ema",
+        action="store_true",
+        help="Use EMA weights from checkpoint for inference.",
     )
     parser.add_argument("--num_seqs", type=int, default=40)
     parser.add_argument("--seq_lens", nargs="*", type=int)
@@ -582,7 +647,7 @@ def main():
     )
     parser.add_argument("--max_iter", type=int, default=500)
     parser.add_argument("--batch_size", type=int, default=50)
-    parser.add_argument("--save_pdb", type=bool, default=True)
+    parser.add_argument("--save_pdb", type=_str2bool, default=True)
     parser.add_argument("--bit_model", action="store_true")
     parser.add_argument(
         "--decoding_strategy",
