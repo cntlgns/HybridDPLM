@@ -364,7 +364,9 @@ class NoiseInputDiffusionProteinLanguageModel(
             alpha_curr = 1.0 - t_curr / T
             alpha_next = 1.0 - t_next / T
 
-            if sampling_strategy.startswith("annealing"):
+            if sampling_strategy == "argmax":
+                cur_temp = 0.0
+            elif sampling_strategy.startswith("annealing"):
                 max_temp, min_temp = map(
                     float, sampling_strategy.split("@")[1].split(":")
                 )
