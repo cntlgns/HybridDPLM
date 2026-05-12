@@ -23,7 +23,7 @@ GEN_ROOT = Path(f"{PROJECT_DIR}/generation-results")
 OUT_DIR = Path(f"{PROJECT_DIR}/analysis/eval_per_seed_sweep/baselines")
 
 ITERS = [1, 3, 5, 10, 30, 100]
-DATASETS = ["cameo2022", "PDB_date"]
+DATASETS = ["cameo2022", "PDB_date", "cath_4.2_all", "cath_4.3_all"]
 
 MODEL = "baseline-full-1e4_lr-fs0_uncond"
 CKPT = "step_6971.0-loss_0.22"

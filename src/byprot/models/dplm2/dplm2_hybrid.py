@@ -713,6 +713,186 @@ class HybridDiffusionProteinLanguageModel(
         newly_clean = newly_clean & still_corrupted
         return newly_clean
 
+    # ------------------------------------------------------------------
+    # MCTS-friendly decoding API (mirrors DPLM2; see dplm2.py)
+    # ------------------------------------------------------------------
+    def init_decoding_state(
+        self,
+        input_tokens,
+        max_iter,
+        partial_masks=None,
+        sampling_strategy="annealing@2.0:0.1",
+        temperature=1.0,
+        **_unused,
+    ):
+        """Build decoding state for hybrid (init y_cache + token state)."""
+        self.eval()
+
+        output_tokens, output_scores = self.initialize_output_tokens(
+            input_tokens, partial_masks=partial_masks
+        )
+        output_masks = self.get_non_special_symbol_mask(
+            output_tokens, partial_masks=partial_masks
+        )
+        y_cache, clean_mask = self._init_hybrid_inference_state(
+            output_tokens, output_masks
+        )
+        ref_tokens = output_tokens.clone()
+        history = [output_tokens.clone()]
+
+        return {
+            "output_tokens": output_tokens,
+            "output_scores": output_scores,
+            "output_masks": output_masks,
+            "y_cache": y_cache,
+            "clean_mask": clean_mask,
+            "ref_tokens": ref_tokens,
+            "history": history,
+            "step": 0,
+            "max_iter": max_iter,
+            "partial_masks": partial_masks,
+            "sampling_strategy": sampling_strategy,
+            "temperature": temperature,
+        }
+
+    @staticmethod
+    def clone_decoding_state(state):
+        """Deep-copy a hybrid state for branching (tensors via .clone())."""
+        import copy as _copy
+
+        new_state = {}
+        for k, v in state.items():
+            if torch.is_tensor(v):
+                new_state[k] = v.clone()
+            elif isinstance(v, list):
+                new_state[k] = [
+                    x.clone() if torch.is_tensor(x) else _copy.copy(x)
+                    for x in v
+                ]
+            else:
+                new_state[k] = _copy.copy(v)
+        return new_state
+
+    def _compute_step_temperature(self, sampling_strategy, step, max_iter, fallback):
+        if sampling_strategy == "argmax":
+            return 0.0
+        if sampling_strategy.startswith("annealing"):
+            max_temp, min_temp = map(
+                float, sampling_strategy.split("@")[1].split(":")
+            )
+            rate = 1.0 - step / max_iter
+            return min_temp + (max_temp - min_temp) * rate
+        return fallback
+
+    def _step_sigmas(self, step, max_iter, device):
+        T = self.cfg.num_diffusion_timesteps
+        noise_space = self.cfg.hybrid.noise_space
+        t_curr = max(int((1.0 - step / max_iter) * T), 1)
+        t_next = max(int((1.0 - (step + 1) / max_iter) * T), 0)
+        sigma_curr = self.noise_schedule.get_sigma(
+            torch.tensor([t_curr], device=device), noise_space
+        ).item()
+        sigma_next = self.noise_schedule.get_sigma(
+            torch.tensor([t_next], device=device), noise_space
+        ).item()
+        alpha_curr = 1.0 - t_curr / T
+        alpha_next = 1.0 - t_next / T
+        return sigma_curr, sigma_next, alpha_curr, alpha_next
+
+    def decoding_step(self, state):
+        """Run a single hybrid denoising iteration in-place on `state`."""
+        step = state["step"]
+        max_iter = state["max_iter"]
+        is_final = step == max_iter - 1
+        device = state["output_tokens"].device
+
+        sigma_curr, sigma_next, alpha_curr, alpha_next = self._step_sigmas(
+            step, max_iter, device
+        )
+        cur_temp = self._compute_step_temperature(
+            state["sampling_strategy"], step, max_iter, state["temperature"]
+        )
+
+        with torch.no_grad():
+            _tokens, _scores, _net_out = self._hybrid_forward_step(
+                state["output_tokens"], state["y_cache"], state["clean_mask"],
+                state["output_masks"], sigma_curr, cur_temp,
+                ref_input_ids=state["ref_tokens"],
+            )
+
+        state["ref_tokens"][state["output_masks"]] = _tokens[state["output_masks"]]
+
+        still_corrupted = ~state["clean_mask"] & state["output_masks"]
+        if is_final:
+            newly_clean = still_corrupted
+        elif still_corrupted.any():
+            unmask_rate = (alpha_next - alpha_curr) / (
+                1.0 - alpha_curr + 1e-8
+            )
+            n_corrupted = still_corrupted.sum(dim=1)
+            k_per_sample = (
+                unmask_rate * n_corrupted.float()
+            ).floor().long()
+            newly_clean = self._select_topk_to_unmask(
+                _scores, still_corrupted, k_per_sample,
+            )
+        else:
+            newly_clean = torch.zeros_like(still_corrupted)
+
+        state["output_tokens"][newly_clean] = _tokens[newly_clean]
+        state["output_scores"][newly_clean] = _scores[newly_clean]
+        state["clean_mask"] = state["clean_mask"] | newly_clean
+
+        # Continuous ODE refinement on remaining corrupted positions.
+        still_corrupted = ~state["clean_mask"] & state["output_masks"]
+        if still_corrupted.any() and sigma_curr > 0 and sigma_next > 0:
+            W = self._get_word_embeddings()
+            E_Y0 = self._maybe_normalize_emb(W[_tokens])
+            score = (state["y_cache"] - E_Y0) / (sigma_curr**2)
+            dt = 0.5 * (sigma_curr**2 - sigma_next**2)
+            state["y_cache"] = state["y_cache"] - dt * score
+
+        state["history"].append(state["output_tokens"].clone())
+        state["step"] = step + 1
+        return state
+
+    def one_shot_complete(self, state):
+        """Force-unmask every still-corrupted position in a single forward.
+
+        Used as the jumpy-denoising rollout for MCTS: the current y_cache
+        and clean_mask are kept, but all still-corrupted positions are
+        sampled in a single hybrid forward pass.
+        """
+        step = state["step"]
+        max_iter = state["max_iter"]
+        device = state["output_tokens"].device
+
+        sigma_curr, _sigma_next, _ac, _an = self._step_sigmas(
+            step, max_iter, device
+        )
+        cur_temp = self._compute_step_temperature(
+            state["sampling_strategy"], step, max_iter, state["temperature"]
+        )
+
+        still_corrupted = ~state["clean_mask"] & state["output_masks"]
+        if not still_corrupted.any():
+            return state
+
+        with torch.no_grad():
+            _tokens, _scores, _net_out = self._hybrid_forward_step(
+                state["output_tokens"], state["y_cache"], state["clean_mask"],
+                state["output_masks"], sigma_curr, cur_temp,
+                ref_input_ids=state["ref_tokens"],
+            )
+
+        state["output_tokens"][still_corrupted] = _tokens[still_corrupted]
+        state["output_scores"][still_corrupted] = _scores[still_corrupted]
+        state["clean_mask"] = state["clean_mask"] | still_corrupted
+        state["ref_tokens"][state["output_masks"]] = _tokens[state["output_masks"]]
+        state["history"].append(state["output_tokens"].clone())
+        state["step"] = step + 1
+        return state
+
     def generate(
         self,
         input_tokens,
@@ -733,106 +913,13 @@ class HybridDiffusionProteinLanguageModel(
         Similar to DPLM2.generate() but replaces discrete mask-only decoding
         with hybrid continuous-discrete decoding.
         """
-        self.eval()
-        T = self.cfg.num_diffusion_timesteps
-        noise_space = self.cfg.hybrid.noise_space
-        device = input_tokens.device
-
-        # 0. Initialize: all maskable positions → mask tokens
-        output_tokens, output_scores = self.initialize_output_tokens(
-            input_tokens, partial_masks=partial_masks
+        state = self.init_decoding_state(
+            input_tokens=input_tokens,
+            max_iter=max_iter,
+            partial_masks=partial_masks,
+            sampling_strategy=sampling_strategy,
+            temperature=temperature,
         )
-        output_masks = self.get_non_special_symbol_mask(
-            output_tokens, partial_masks=partial_masks
-        )
-
-        # Hybrid state
-        y_cache, clean_mask = self._init_hybrid_inference_state(
-            output_tokens, output_masks
-        )
-        history = [output_tokens.clone()]
-
-        # ref_tokens: mask-free version of output_tokens used as input_ids
-        # so that ESM's token_dropout applies 0.88 scaling (matching training)
-        # without zeroing any positions. Initialized from output_tokens;
-        # corrupted positions are updated with model predictions each step.
-        ref_tokens = output_tokens.clone()
-
-        for step in range(max_iter):
-            is_final = step == max_iter - 1
-
-            # Timestep mapping (decreasing from T to 0)
-            t_curr = max(int((1.0 - step / max_iter) * T), 1)
-            t_next = max(int((1.0 - (step + 1) / max_iter) * T), 0)
-            sigma_curr = self.noise_schedule.get_sigma(
-                torch.tensor([t_curr], device=device), noise_space
-            ).item()
-            sigma_next = self.noise_schedule.get_sigma(
-                torch.tensor([t_next], device=device), noise_space
-            ).item()
-            alpha_curr = 1.0 - t_curr / T
-            alpha_next = 1.0 - t_next / T
-
-            # Temperature annealing
-            if sampling_strategy == "argmax":
-                cur_temp = 0.0
-            elif sampling_strategy.startswith("annealing"):
-                max_temp, min_temp = map(
-                    float, sampling_strategy.split("@")[1].split(":")
-                )
-                rate = 1.0 - step / max_iter
-                cur_temp = min_temp + (max_temp - min_temp) * rate
-            else:
-                cur_temp = temperature
-
-            # 1. Forward pass → logits → sample tokens
-            with torch.no_grad():
-                _tokens, _scores, net_out = self._hybrid_forward_step(
-                    output_tokens, y_cache, clean_mask,
-                    output_masks, sigma_curr, cur_temp,
-                    ref_input_ids=ref_tokens,
-                )
-
-            # Update ref_tokens with predictions for all maskable positions
-            ref_tokens[output_masks] = _tokens[output_masks]
-
-            # 2. Discrete step: unmask top-k by confidence
-            still_corrupted = ~clean_mask & output_masks
-            # import ipdb; ipdb.set_trace()
-
-            if is_final:
-                newly_clean = still_corrupted
-            elif still_corrupted.any():
-                unmask_rate = (alpha_next - alpha_curr) / (
-                    1.0 - alpha_curr + 1e-8
-                )
-                n_corrupted = still_corrupted.sum(dim=1)
-                # k_per_sample = (
-                #     unmask_rate * n_corrupted.float()
-                # ).ceil().long().clamp(min=1)
-                k_per_sample = (
-                    unmask_rate * n_corrupted.float()
-                ).floor().long()                                # sihun: hybrid refine if no need to sample
-                newly_clean = self._select_topk_to_unmask(
-                    _scores, still_corrupted, k_per_sample,
-                )
-            else:
-                newly_clean = torch.zeros_like(still_corrupted)
-
-            # Commit tokens at newly unmasked positions
-            output_tokens[newly_clean] = _tokens[newly_clean]
-            output_scores[newly_clean] = _scores[newly_clean]
-            clean_mask = clean_mask | newly_clean
-
-            # 3. Continuous ODE step for still-corrupted positions
-            still_corrupted = ~clean_mask & output_masks
-            if still_corrupted.any() and sigma_curr > 0 and sigma_next > 0:
-                W = self._get_word_embeddings()
-                E_Y0 = self._maybe_normalize_emb(W[_tokens])
-                score = (y_cache - E_Y0) / (sigma_curr**2)
-                dt = 0.5 * (sigma_curr**2 - sigma_next**2)
-                y_cache = y_cache - dt * score
-
-            history.append(output_tokens.clone())
-
-        return {"output_tokens": output_tokens}
+        for _ in range(max_iter):
+            state = self.decoding_step(state)
+        return {"output_tokens": state["output_tokens"]}

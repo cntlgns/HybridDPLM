@@ -1,9 +1,9 @@
 """
-Single-model per-seed sweep plot: oh-xhigh_noise-full-3e5_lr-fs0-normemb.
+Single-model per-seed sweep plot: emb-high_noise-full-1e4_lr (FT9, hybrid).
 
-Layout mirrors plot_eval_per_seed_sweep_emb1high.py for a single model: each
-iter slot shows argmax + every available annealing decoding, with filled =
-typical (median/mean across proteins) and hollow = oracle best per protein.
+Mirrors plot_eval_per_seed_sweep_oh.py for the FT9 hybrid ckpt so we can read
+the new annealing variants (max_T:1.0 schedules) side-by-side with the older
+max_T:0.1 sweep and argmax.
 
 8 plots: 2 datasets x {ca_rmsd, tm_score} x {median, mean}.
 """
@@ -17,14 +17,14 @@ import pandas as pd
 
 PROJECT_DIR = "/data_fast/home/sihun/diffprotein/dplm"
 GEN_ROOT = Path(f"{PROJECT_DIR}/generation-results")
-OUT_DIR = Path(f"{PROJECT_DIR}/analysis/eval_per_seed_sweep/oh")
+OUT_DIR = Path(f"{PROJECT_DIR}/analysis/eval_per_seed_sweep/ft9")
 
 ITERS = [1, 3, 5, 10, 30, 100, 500]
 DATASETS = ["cameo2022", "PDB_date", "cath_4.2_all", "cath_4.3_all"]
 
-MODEL_DIR = "oh-xhigh_noise-full-3e5_lr-fs0-normemb"
-CKPT = "step_10256.0-loss_0.70"
-TITLE_LABEL = "oh-xhigh (3e-5 lr, fs0, normemb)"
+MODEL_DIR = "emb-high_noise-full-1e4_lr"
+CKPT = "step_9843.0-loss_0.68"
+TITLE_LABEL = "FT9 emb-high (1e-4 lr)"
 
 METRICS = {
     "ca_rmsd":  ("ca_rmsd",   "min"),
