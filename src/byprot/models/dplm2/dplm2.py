@@ -972,6 +972,285 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
         # print(output_tokens[49][131:259])
         return new_xt_neq_x0, output_tokens, output_scores
 
+    # ------------------------------------------------------------------
+    # MCTS-friendly decoding API
+    #
+    # generate() is preserved as a thin wrapper over the three primitives
+    # below so that external callers (tree search, jumpy rollouts, ...)
+    # can step the model one iteration at a time and clone/branch the
+    # decoding state. The original control flow is unchanged when the
+    # primitives are called in sequence by generate().
+    # ------------------------------------------------------------------
+    def init_decoding_state(
+        self,
+        input_tokens,
+        max_iter,
+        partial_masks=None,
+        unmasking_strategy="stochastic1.0",
+        sampling_strategy="annealing@2.0:0.1",
+        remasking_strategy="uncond",
+        decoding_strategy=None,
+        feedforward_mode="discrete",
+        mask_emb_mode="add",
+        temperature=1.0,
+    ):
+        """Build the per-call decoding state used by `decoding_step`.
+
+        Returns a self-contained dict so that callers (e.g. MCTS) can
+        clone it via `clone_decoding_state` and resume from any step.
+        """
+        self.eval()
+
+        if not feedforward_mode.startswith("discrete"):
+            self.net.esm.embeddings.token_dropout = False
+
+        if decoding_strategy is None:
+            strategy_name = "reparam"
+        else:
+            strategy_name = parse_strategy_name(decoding_strategy)
+
+        encoder_out = self.forward_encoder(input_tokens)
+        (
+            initial_output_tokens,
+            initial_output_scores,
+        ) = self.initialize_output_tokens(
+            input_tokens, encoder_out=encoder_out, partial_masks=partial_masks
+        )
+        prev_decoder_out = dict(
+            output_tokens=initial_output_tokens,
+            output_scores=initial_output_scores,
+            output_masks=None,
+            attentions=None,
+            step=0,
+            max_step=max_iter,
+            history=[initial_output_tokens.clone()],
+            temperature=temperature,
+            type_ids=self.get_modality_type(initial_output_tokens),
+        )
+
+        prev_decoder_out["output_masks"] = self.get_non_special_symbol_mask(
+            prev_decoder_out["output_tokens"], partial_masks=partial_masks
+        )
+
+        strategy_kwargs = (
+            parse_strategy_kwargs(decoding_strategy) if decoding_strategy else {}
+        )
+        strategy_state = {}
+        B, L = initial_output_tokens.shape
+
+        if strategy_name == "klass":
+            n = strategy_kwargs.get("n", 2)
+            strategy_state["klass_aa"] = KLASSState(n=n)
+            strategy_state["klass_struct"] = KLASSState(n=n)
+            strategy_state["prev_log_probs"] = None
+        elif strategy_name == "dinfer_credit":
+            V = getattr(self.cfg, "vocab_size", None) or getattr(
+                self.cfg.tokenizer, "vocab_size", 8229
+            )
+            strategy_state["credit_aa"] = CreditState(
+                B, L, V, initial_output_tokens.device,
+                beta=strategy_kwargs.get("beta", 0.8),
+                gamma=strategy_kwargs.get("gamma", 0.2),
+            )
+            strategy_state["credit_struct"] = CreditState(
+                B, L, V, initial_output_tokens.device,
+                beta=strategy_kwargs.get("beta", 0.8),
+                gamma=strategy_kwargs.get("gamma", 0.2),
+            )
+        elif strategy_name == "lrd":
+            tau_refine = strategy_kwargs.get("tau_refine", 0.1)
+            T_refine = strategy_kwargs.get("T_refine", 20)
+            strategy_state["lrd_aa"] = LRDState(
+                tau_refine=tau_refine, T_refine=T_refine,
+            )
+            strategy_state["lrd_struct"] = LRDState(
+                tau_refine=tau_refine, T_refine=T_refine,
+            )
+
+        return {
+            "prev_decoder_out": prev_decoder_out,
+            "strategy_name": strategy_name,
+            "strategy_kwargs": strategy_kwargs,
+            "strategy_state": strategy_state,
+            "max_iter": max_iter,
+            "partial_masks": partial_masks,
+            "unmasking_strategy": unmasking_strategy,
+            "sampling_strategy": sampling_strategy,
+            "remasking_strategy": remasking_strategy,
+            "decoding_strategy": decoding_strategy,
+            "feedforward_mode": feedforward_mode,
+            "mask_emb_mode": mask_emb_mode,
+        }
+
+    @staticmethod
+    def clone_decoding_state(state):
+        """Deep-copy a state produced by `init_decoding_state` for branching."""
+        import copy as _copy
+
+        prev = state["prev_decoder_out"]
+        new_prev = {}
+        for k, v in prev.items():
+            if torch.is_tensor(v):
+                new_prev[k] = v.clone()
+            elif isinstance(v, list):
+                new_prev[k] = [
+                    x.clone() if torch.is_tensor(x) else _copy.copy(x)
+                    for x in v
+                ]
+            else:
+                new_prev[k] = _copy.copy(v)
+
+        new_state = dict(state)
+        new_state["prev_decoder_out"] = new_prev
+        new_state["strategy_state"] = _copy.deepcopy(state["strategy_state"])
+        return new_state
+
+    def decoding_step(self, state):
+        """Run a single denoising iteration in-place on `state`.
+
+        Mirrors one iteration of the original `generate` loop body.
+        Returns the updated state (same object).
+        """
+        prev_decoder_out = state["prev_decoder_out"]
+        partial_masks = state["partial_masks"]
+        sampling_strategy = state["sampling_strategy"]
+        feedforward_mode = state["feedforward_mode"]
+        mask_emb_mode = state["mask_emb_mode"]
+        strategy_name = state["strategy_name"]
+        strategy_kwargs = state["strategy_kwargs"]
+        strategy_state = state["strategy_state"]
+        unmasking_strategy = state["unmasking_strategy"]
+        remasking_strategy = state["remasking_strategy"]
+        max_iter = state["max_iter"]
+
+        step = prev_decoder_out["step"]
+
+        # Early stopping: if nothing is masked, no-op (matches generate()).
+        if strategy_name != "reparam":
+            if not prev_decoder_out["output_masks"].any():
+                return state
+
+        with torch.no_grad():
+            decoder_out = self.forward_decoder(
+                prev_decoder_out=prev_decoder_out,
+                partial_masks=partial_masks,
+                sampling_strategy=sampling_strategy,
+                feedforward_mode=feedforward_mode,
+                mask_emb_mode=mask_emb_mode,
+            )
+
+        output_tokens = decoder_out["output_tokens"]
+        output_scores = decoder_out["output_scores"]
+
+        non_special_sym_mask = self.get_non_special_symbol_mask(
+            prev_decoder_out["output_tokens"], partial_masks=partial_masks
+        )
+
+        if strategy_name == "reparam":
+            (
+                output_masks,
+                result_tokens,
+                result_scores,
+            ) = self._reparam_decoding(
+                output_tokens=prev_decoder_out["output_tokens"].clone(),
+                output_scores=prev_decoder_out["output_scores"].clone(),
+                cur_tokens=output_tokens.clone(),
+                cur_scores=output_scores.clone(),
+                decoding_strategy=f"reparam-{remasking_strategy}-{unmasking_strategy}-linear",
+                xt_neq_x0=prev_decoder_out["output_masks"],
+                type_ids=prev_decoder_out["type_ids"].clone(),
+                non_special_sym_mask=non_special_sym_mask,
+                t=step + 1,
+                max_step=max_iter,
+            )
+        else:
+            (
+                output_masks,
+                result_tokens,
+                result_scores,
+            ) = self._apply_new_strategy(
+                strategy_name=strategy_name,
+                strategy_kwargs=strategy_kwargs,
+                strategy_state=strategy_state,
+                prev_tokens=prev_decoder_out["output_tokens"].clone(),
+                prev_scores=prev_decoder_out["output_scores"].clone(),
+                cur_tokens=output_tokens.clone(),
+                cur_scores=output_scores.clone(),
+                cur_log_probs=decoder_out.get("logits"),
+                xt_neq_x0=prev_decoder_out["output_masks"],
+                type_ids=prev_decoder_out["type_ids"].clone(),
+                non_special_sym_mask=non_special_sym_mask,
+                step=step,
+            )
+
+        is_final = (step == max_iter - 1)
+        if strategy_name != "reparam" and is_final:
+            still_masked = output_masks & non_special_sym_mask
+            if still_masked.any():
+                raw_tokens = decoder_out["output_tokens"]
+                raw_scores = decoder_out["output_scores"]
+                result_tokens[still_masked] = raw_tokens[still_masked]
+                result_scores[still_masked] = raw_scores[still_masked]
+                output_masks = output_masks & ~still_masked
+
+        prev_decoder_out.update(output_masks=output_masks)
+        prev_decoder_out.update(
+            output_tokens=result_tokens,
+            output_scores=result_scores,
+            step=step + 1,
+            history=decoder_out["history"],
+            prev_log_probs=decoder_out.get("logits"),
+        )
+        return state
+
+    def one_shot_complete(self, state):
+        """Force-unmask every still-masked position in a single forward pass.
+
+        Used as the "jumpy denoising" rollout in MCTS: takes a partial
+        state x_{t+1} and produces ~x_T = x_{t+1} with all remaining
+        masked positions sampled in one model call. The state is mutated
+        in place; the same dict is returned for chaining.
+        """
+        prev_decoder_out = state["prev_decoder_out"]
+        partial_masks = state["partial_masks"]
+        sampling_strategy = state["sampling_strategy"]
+        feedforward_mode = state["feedforward_mode"]
+        mask_emb_mode = state["mask_emb_mode"]
+
+        non_special_sym_mask = self.get_non_special_symbol_mask(
+            prev_decoder_out["output_tokens"], partial_masks=partial_masks
+        )
+        still_masked = prev_decoder_out["output_masks"] & non_special_sym_mask
+        if not still_masked.any():
+            return state
+
+        with torch.no_grad():
+            decoder_out = self.forward_decoder(
+                prev_decoder_out=prev_decoder_out,
+                partial_masks=partial_masks,
+                sampling_strategy=sampling_strategy,
+                feedforward_mode=feedforward_mode,
+                mask_emb_mode=mask_emb_mode,
+            )
+
+        result_tokens = prev_decoder_out["output_tokens"].clone()
+        result_scores = prev_decoder_out["output_scores"].clone()
+        cur_tokens = decoder_out["output_tokens"]
+        cur_scores = decoder_out["output_scores"]
+        result_tokens[still_masked] = cur_tokens[still_masked]
+        result_scores[still_masked] = cur_scores[still_masked]
+
+        new_output_masks = prev_decoder_out["output_masks"] & ~still_masked
+        prev_decoder_out.update(
+            output_tokens=result_tokens,
+            output_scores=result_scores,
+            output_masks=new_output_masks,
+            step=prev_decoder_out["step"] + 1,
+            history=decoder_out["history"],
+            prev_log_probs=decoder_out.get("logits"),
+        )
+        return state
+
     def generate(
         self,
         input_tokens,
@@ -1014,168 +1293,29 @@ class MultimodalDiffusionProteinLanguageModel(nn.Module):
         #         [ 1.4609,  1.2656,  1.0938,  1.0391,  1.4375,  1.6875,  2.1094,  1.3828,  1.3359,  1.5234,  2.1250,  1.5859,  1.9766,  2.1875,  3.1406,  4.5312,  2.7188,  2.6562, 12.3125,  3.2188],
         #         [ 1.0078,  1.3906,  1.4453,  1.5312,  1.9453,  1.1406,  2.0000,  1.6562,  1.5000,  1.2891,  2.0625,  1.1094,  1.7500,  2.0625,  2.0625,  2.5469,  2.2344,  2.2188,  3.2188,  9.9375]], device='cuda:0',dtype=torch.bfloat16, grad_fn=<MmBackward0>)
 
-        if not feedforward_mode.startswith("discrete"):
-            self.net.esm.embeddings.token_dropout = False
-
-
-        # Determine which decoding path to use
-        if decoding_strategy is None:
-            strategy_name = "reparam"
-        else:
-            strategy_name = parse_strategy_name(decoding_strategy)
-
-        # LRD requires entropy-based soft embeddings for both phases
-        # if strategy_name == "lrd":
-        #     feedforward_mode = "entropy"
-        #     mask_emb_mode = "replace"
-
-        # 0) encoding
-        encoder_out = self.forward_encoder(input_tokens)
-        # 1) initialized from all mask tokens
-        (
-            initial_output_tokens,
-            initial_output_scores,
-        ) = self.initialize_output_tokens(
-            input_tokens, encoder_out=encoder_out, partial_masks=partial_masks
-        )
-        prev_decoder_out = dict(
-            output_tokens=initial_output_tokens,
-            output_scores=initial_output_scores,
-            output_masks=None,
-            attentions=None,
-            step=0,
-            max_step=max_iter,
-            history=[initial_output_tokens.clone()],
+        state = self.init_decoding_state(
+            input_tokens=input_tokens,
+            max_iter=max_iter,
+            partial_masks=partial_masks,
+            unmasking_strategy=unmasking_strategy,
+            sampling_strategy=sampling_strategy,
+            remasking_strategy=remasking_strategy,
+            decoding_strategy=decoding_strategy,
+            feedforward_mode=feedforward_mode,
+            mask_emb_mode=mask_emb_mode,
             temperature=temperature,
-            type_ids=self.get_modality_type(initial_output_tokens),
         )
 
-        prev_decoder_out["output_masks"] = self.get_non_special_symbol_mask(
-            prev_decoder_out["output_tokens"], partial_masks=partial_masks
-        )
-
-        # --- Initialize strategy-specific state ---
-        strategy_kwargs = parse_strategy_kwargs(decoding_strategy) if decoding_strategy else {}
-        strategy_state = {}
-        B, L = initial_output_tokens.shape
-
-        if strategy_name == "klass":
-            n = strategy_kwargs.get("n", 2)
-            strategy_state["klass_aa"] = KLASSState(n=n)
-            strategy_state["klass_struct"] = KLASSState(n=n)
-            strategy_state["prev_log_probs"] = None
-        elif strategy_name == "dinfer_credit":
-            V = getattr(self.cfg, "vocab_size", None) or getattr(self.cfg.tokenizer, "vocab_size", 8229)
-            strategy_state["credit_aa"] = CreditState(
-                B, L, V, initial_output_tokens.device,
-                beta=strategy_kwargs.get("beta", 0.8),
-                gamma=strategy_kwargs.get("gamma", 0.2),
-            )
-            strategy_state["credit_struct"] = CreditState(
-                B, L, V, initial_output_tokens.device,
-                beta=strategy_kwargs.get("beta", 0.8),
-                gamma=strategy_kwargs.get("gamma", 0.2),
-            )
-        elif strategy_name == "lrd":
-            tau_refine = strategy_kwargs.get("tau_refine", 0.1)
-            T_refine = strategy_kwargs.get("T_refine", 20)
-            strategy_state["lrd_aa"] = LRDState(
-                tau_refine=tau_refine, T_refine=T_refine,
-            )
-            strategy_state["lrd_struct"] = LRDState(
-                tau_refine=tau_refine, T_refine=T_refine,
-            )
-
-        for step in tqdm(range(max_iter), desc="Decoding"):
-            # Early stopping: if nothing is masked, stop
-            if strategy_name != "reparam":
-                if not prev_decoder_out["output_masks"].any():
+        for _ in tqdm(range(max_iter), desc="Decoding"):
+            # Match original early-stopping behavior for non-reparam paths:
+            # break out of the loop entirely once nothing remains masked.
+            if state["strategy_name"] != "reparam":
+                if not state["prev_decoder_out"]["output_masks"].any():
                     break
+            state = self.decoding_step(state)
 
-            # 2.1: predict
-            with torch.no_grad():
-                decoder_out = self.forward_decoder(
-                    prev_decoder_out=prev_decoder_out,
-                    partial_masks=partial_masks,
-                    sampling_strategy=sampling_strategy,
-                    feedforward_mode=feedforward_mode,
-                    mask_emb_mode=mask_emb_mode,
-                )
-
-            output_tokens = decoder_out["output_tokens"]
-            output_scores = decoder_out["output_scores"]
-
-            # 2.2: re-mask / unmask
-            non_special_sym_mask = self.get_non_special_symbol_mask(
-                prev_decoder_out["output_tokens"], partial_masks=partial_masks
-            )
-
-            if strategy_name == "reparam":
-                # Legacy path
-                (
-                    output_masks,
-                    result_tokens,
-                    result_scores,
-                ) = self._reparam_decoding(
-                    output_tokens=prev_decoder_out["output_tokens"].clone(),
-                    output_scores=prev_decoder_out["output_scores"].clone(),
-                    cur_tokens=output_tokens.clone(),
-                    cur_scores=output_scores.clone(),
-                    decoding_strategy=f"reparam-{remasking_strategy}-{unmasking_strategy}-linear",
-                    xt_neq_x0=prev_decoder_out["output_masks"],
-                    type_ids=prev_decoder_out["type_ids"].clone(),
-                    non_special_sym_mask=non_special_sym_mask,
-                    t=step + 1,
-                    max_step=max_iter,
-                )
-            else:
-                # New strategy path: apply per modality (AA / struct)
-                (
-                    output_masks,
-                    result_tokens,
-                    result_scores,
-                ) = self._apply_new_strategy(
-                    strategy_name=strategy_name,
-                    strategy_kwargs=strategy_kwargs,
-                    strategy_state=strategy_state,
-                    prev_tokens=prev_decoder_out["output_tokens"].clone(),
-                    prev_scores=prev_decoder_out["output_scores"].clone(),
-                    cur_tokens=output_tokens.clone(),
-                    cur_scores=output_scores.clone(),
-                    cur_log_probs=decoder_out.get("logits"),
-                    xt_neq_x0=prev_decoder_out["output_masks"],
-                    type_ids=prev_decoder_out["type_ids"].clone(),
-                    non_special_sym_mask=non_special_sym_mask,
-                    step=step,
-                )
-
-            # Final step: force-unmask remaining
-            # (LRD convergence is handled per-sample inside decode_lrd)
-            is_final = (step == max_iter - 1)
-            if strategy_name != "reparam" and is_final:
-                still_masked = output_masks & non_special_sym_mask
-                if still_masked.any():
-                    raw_tokens = decoder_out["output_tokens"]
-                    raw_scores = decoder_out["output_scores"]
-                    result_tokens[still_masked] = raw_tokens[still_masked]
-                    result_scores[still_masked] = raw_scores[still_masked]
-                    output_masks = output_masks & ~still_masked
-
-            prev_decoder_out.update(output_masks=output_masks)
-            output_tokens = result_tokens
-            output_scores = result_scores
-
-            prev_decoder_out.update(
-                output_tokens=output_tokens,
-                output_scores=output_scores,
-                step=step + 1,
-                history=decoder_out["history"],
-                prev_log_probs=decoder_out.get("logits"),
-            )
-
-        decoder_out = prev_decoder_out
         return {
-            "output_tokens": decoder_out["output_tokens"],
+            "output_tokens": state["prev_decoder_out"]["output_tokens"],
         }
 
     def _apply_new_strategy(

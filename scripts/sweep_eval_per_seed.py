@@ -51,14 +51,21 @@ def result_base(max_iter: int) -> str:
 # Absolute paths to .ckpt files. Leave a list empty to skip that kind entirely.
 NOISE_CKPTS: list[str] = [
     # f"{PROJECT_DIR}/train_logs/.../checkpoints/step_*.ckpt",
-    f"{PROJECT_DIR}/train_logs/noiseFT/noise-full-1e4_lr-fs0-cutL0/checkpoints/step_8202.0-loss_0.70.ckpt", # ON
+    # f"{PROJECT_DIR}/train_logs/noiseFT/noise-full-1e4_lr-fs0-cutL0/checkpoints/step_8202.0-loss_0.70.ckpt", # ON
     # f"{PROJECT_DIR}/train_logs/noiseFT2/noise-full-1e4_lr-linear/checkpoints/step_9025.0-loss_0.22.ckpt", # ON
+    # Cross-eval: hybrid-trained ckpts run through noise inference. ckpt
+    # hardlinked into cross_eval/ with a noise-style .hydra/config.yaml
+    # (hybrid: block stripped, sample_noise_every_step added). Same weights as
+    # the corresponding entry in HYBRID_CKPTS — isolates train- vs inference-
+    # time gain of hybrid.
+    f"{PROJECT_DIR}/train_logs/cross_eval/FT9_as_noise/checkpoints/step_9843.0-loss_0.68.ckpt",
+    f"{PROJECT_DIR}/train_logs/cross_eval/FTO3_as_noise/checkpoints/step_10256.0-loss_0.70.ckpt",
 ]
 
 BASELINE_CKPTS: list[str] = [
     # f"{PROJECT_DIR}/train_logs/.../checkpoints/step_*.ckpt",
     # "hf:<org>/<name>"  -> evaluate untuned pretrained HF model (sanity / repro)
-    f"{PROJECT_DIR}/train_logs/noiseFT/baseline-full-1e4_lr-fs0/checkpoints/step_6971.0-loss_0.22.ckpt", # ON
+    # f"{PROJECT_DIR}/train_logs/noiseFT/baseline-full-1e4_lr-fs0/checkpoints/step_6971.0-loss_0.22.ckpt", # ON
     # f"{PROJECT_DIR}/train_logs/noiseFT/baseline-full-1e5_lr-fs0/checkpoints/step_7792.0-loss_0.22.ckpt",
     # f"{PROJECT_DIR}/train_logs/noiseFT2/baseline-full-1e4_lr-constant/checkpoints/step_7176.0-loss_0.70.ckpt", # ON
     # "hf:airkingbd/dplm2_650m",
@@ -67,15 +74,22 @@ BASELINE_CKPTS: list[str] = [
 HYBRID_CKPTS: list[str] = [
     # f"{PROJECT_DIR}/train_logs/.../checkpoints/step_*.ckpt",
     # f"{PROJECT_DIR}/train_logs/FT6/emb-high_noise-full-ema_lr_745-fs0-normemb/checkpoints/step_9005.0-loss_0.67.ckpt", #FT6 vs FT9 -> FT9
-    f"{PROJECT_DIR}/train_logs/FT9/emb-high_noise-full-1e4_lr/checkpoints/step_9843.0-loss_0.68.ckpt", # ON
+    # f"{PROJECT_DIR}/train_logs/FT9/emb-high_noise-full-1e4_lr/checkpoints/step_9843.0-loss_0.68.ckpt", # ON
     # f"{PROJECT_DIR}/train_logs/FT10/emb-high_noise-full-3e5_lr-linear/checkpoints/step_15995.0-loss_0.20.ckpt",
     # f"{PROJECT_DIR}/train_logs/FT10/emb-1high_noise-full-1e4_lr-linear/checkpoints/step_15995.0-loss_0.21.ckpt", # ON
     # f"{PROJECT_DIR}/train_logs/FT10/emb-xhigh_noise-full-1e4_lr-linear/checkpoints/step_15995.0-loss_0.22.ckpt"
     # f"{PROJECT_DIR}/train_logs/FT10/emb-2xhigh_noise-full-1e4_lr-linear/checkpoints/step_15995.0-loss_0.22.ckpt",
-    f"{PROJECT_DIR}/train_logs/FTO3/oh-xhigh_noise-full-3e5_lr-fs0-normemb/checkpoints/step_10256.0-loss_0.70.ckpt",
+    # f"{PROJECT_DIR}/train_logs/FTO3/oh-xhigh_noise-full-3e5_lr-fs0-normemb/checkpoints/step_10256.0-loss_0.70.ckpt", # ON
+    # Cross-eval: noise-trained ckpt run through hybrid inference. Same noise
+    # ckpt hardlinked twice into cross_eval/ with a hybrid-style .hydra/
+    # config.yaml — once with FT9-style hybrid block (embedding, sigma 0.5-5),
+    # once with FTO3-style (onehot, r 0.25-0.47). Isolates train- vs inference-
+    # time gain of hybrid.
+    f"{PROJECT_DIR}/train_logs/cross_eval/noise_as_hybrid_FT9/checkpoints/step_8202.0-loss_0.70.ckpt",
+    f"{PROJECT_DIR}/train_logs/cross_eval/noise_as_hybrid_FTO3/checkpoints/step_8202.0-loss_0.70.ckpt",
 ]
 
-DATASETS = ["cameo2022", "PDB_date", "cath_4.2_all", "cath_4.3_all"]
+DATASETS = ["cameo2022", "PDB_date"]#, "cath_4.2_all", "cath_4.3_all"]
 
 # Per-dataset batch size tuning
 BATCH_SIZE_BY_DATASET = {
@@ -94,13 +108,13 @@ ANNEALING_SWEEP_BY_MAX_ITER: dict[int, list[tuple[str, str]]] = {
     1: [
         # ("annealing@1.0:0.1", "annealing1.0_0.1"),
         # ("annealing@0.7:0.1", "annealing0.7_0.1"),
-        ("annealing@0.5:0.1", "annealing0.5_0.1"),
+        # ("annealing@0.5:0.1", "annealing0.5_0.1"),
         # ("annealing@0.1:0.1", "annealing0.1_0.1"),
     ],
     3: [
         # ("annealing@1.0:0.1", "annealing1.0_0.1"),
         # ("annealing@0.7:0.1", "annealing0.7_0.1"),
-        ("annealing@0.5:0.1", "annealing0.5_0.1"),
+        # ("annealing@0.5:0.1", "annealing0.5_0.1"),
         # ("annealing@0.1:0.1", "annealing0.1_0.1"),
         # ("annealing@0.1:0.01", "annealing0.1_0.01"),
         # ("annealing@1.0:1.0", "annealing1.0_1.0"),
@@ -113,8 +127,8 @@ ANNEALING_SWEEP_BY_MAX_ITER: dict[int, list[tuple[str, str]]] = {
         # ("annealing@0.3:0.1", "annealing0.3_0.1"),
         # ("annealing@0.1:0.1", "annealing0.1_0.1"),
         # ("annealing@0.1:0.01", "annealing0.1_0.01"),
-        ("annealing@1.0:1.0", "annealing1.0_1.0"),
-        ("annealing@2.0:1.0", "annealing2.0_1.0"),
+        # ("annealing@1.0:1.0", "annealing1.0_1.0"),
+        # ("annealing@2.0:1.0", "annealing2.0_1.0"),
     ],
     10: [
         # ("annealing@2.0:0.1", "annealing2.0_0.1"),
@@ -125,7 +139,7 @@ ANNEALING_SWEEP_BY_MAX_ITER: dict[int, list[tuple[str, str]]] = {
         # ("annealing@1.0:1.0", "annealing1.0_1.0"),
         ("annealing@2.0:1.0", "annealing2.0_1.0"),
         ("annealing@3.0:1.0", "annealing3.0_1.0"),
-        ("annealing@5.0:1.0", "annealing5.0_1.0"),
+        # ("annealing@5.0:1.0", "annealing5.0_1.0"),
     ],
     30: [
         # ("annealing@2.0:0.1", "annealing2.0_0.1"),
@@ -143,8 +157,8 @@ ANNEALING_SWEEP_BY_MAX_ITER: dict[int, list[tuple[str, str]]] = {
         # ("annealing@1.0:0.1", "annealing1.0_0.1"),
         # ("annealing@1.0:1.0", "annealing1.0_1.0"),
         ("annealing@2.0:1.0", "annealing2.0_1.0"),
-        # ("annealing@3.0:1.0", "annealing3.0_1.0"),
-        ("annealing@5.0:1.0", "annealing5.0_1.0"),
+        ("annealing@3.0:1.0", "annealing3.0_1.0"),
+        # ("annealing@5.0:1.0", "annealing5.0_1.0"),
     ],
     # 500: [
     #     # ("annealing@10.0:0.1", "annealing10.0_0.1"),
